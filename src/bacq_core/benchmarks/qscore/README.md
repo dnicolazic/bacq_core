@@ -54,11 +54,33 @@ Parameters:
 - `initial_size`: smallest MaxCut graph size to test.
 - `size_limit`: largest MaxCut graph size to test.
 - `beta`: QScore threshold ratio.
-- `iterator`: `dichotomic` (binary search) or `exhaustive`.
+- `iterator`: `dichotomic` (binary search) or `exhaustive` (consecutive sizes
+  until the first failing size or the inclusive limit).
 - `depth`: QAOA depth.
-- `seed`: integer graph-generation seed, or `null` for a random seed.
+- `seed`: non-negative integer graph-generation seed, or `null` for a random
+  seed.
+- `qutip_steps`: positive integer evolution discretization for QutipQPU
+  (default 100).
+- `qutip_tmax`: finite positive AQO evolution time for QutipQPU (default 5.0,
+  matching the reference BACQ QutipQPU notebook). Saved with the result
+  parameters. Previously it was hard-coded to 1.0, which produced a ratio
+  below the threshold at size 5 and stopped the search immediately.
+  Other annealers retain their existing evolution time.
 
 QScore performs the graph-size sweep itself; use a single BACQ `protocol` input,
 not `protocol_seq`. BACQ records the QScore boundary or bound as its metric.
 `success` is true when QScore identifies an exact boundary between a passing
 and a failing size; it is false when the result is only an upper or lower bound.
+A size passes only when its ratio is strictly greater than `beta`; equality is
+a failing size. Thus the exact boundary is the passing size immediately before
+the first failing size. `dichotomic` assumes this pass/fail behavior is
+monotonic over graph sizes. When `initial_size` equals `size_limit`, the single
+size is evaluated once and can only produce an upper or lower bound, not an
+exact boundary. The per-instance seeds advance consecutively across all
+evaluated sizes and are included in the raw data.
+
+All QAOA and annealing paths save `duration_seconds` per instance in `raw_data`
+and `instance_duration_sum` in each size evaluation. Timings measure QPU
+submission/result resolution, including the QAOA optimizer where applicable,
+but exclude graph/job construction and result-file writing. The workbench uses
+these measured values for mean-instance and total-per-size runtime curves.

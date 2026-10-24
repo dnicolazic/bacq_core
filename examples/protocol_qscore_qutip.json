@@ -8,6 +8,8 @@
         "beta": 0.2,
         "iterator": "dichotomic",
         "depth": 1,
-        "seed": 42
+        "seed": 42,
+        "qutip_steps": 100,
+        "qutip_tmax": 5.0
     }
 }

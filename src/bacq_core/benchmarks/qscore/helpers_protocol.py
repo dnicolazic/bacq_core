@@ -19,8 +19,11 @@ def check_parameters_value(initial_size, size_limit, beta, iterator, depth, seed
         raise ValueError("iterator must be 'exhaustive' or 'dichotomic'.")
     if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
         raise ValueError("depth must be a positive integer.")
-    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
-        raise TypeError("seed must be an integer or null.")
+    if seed is not None:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise TypeError("seed must be an integer or null.")
+        if seed < 0:
+            raise ValueError("seed must be non-negative.")
 
 
 def sequence_generator(**_parameters):

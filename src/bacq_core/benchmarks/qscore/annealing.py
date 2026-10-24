@@ -1,11 +1,15 @@
 """Run QScore's MaxCut size search with myQLM annealing QPUs."""
 
+import math
+import time
 from numbers import Integral, Real
 
 import networkx as nx
 import numpy as np
 from qat.opt import MaxCut
 from qat.qscore.iterators import Driver
+
+from .helpers_protocol import check_parameters_value
 
 
 _NB_INSTANCES_PER_SIZE = 100
@@ -18,6 +22,8 @@ def _state_bits(state, n_qubits):
         raise TypeError("QPU sample state must not be a boolean.")
     if isinstance(state, Integral):
         integer_state = int(state)
+        if integer_state < 0 or integer_state >= 1 << n_qubits:
+            raise ValueError("QPU sample state is outside the graph's state space.")
         return [(integer_state >> index) & 1 for index in range(n_qubits)]
 
     state_text = str(state).replace("|", "").replace(">", "").strip()
@@ -39,6 +45,8 @@ def _score_from_result(result, graph):
     if value is not None:
         if isinstance(value, bool) or not isinstance(value, Real):
             raise TypeError("QPU result value must be a real number or null.")
+        if not math.isfinite(value):
+            raise ValueError("QPU result value must be finite.")
         return float(-value)
 
     raw_data = getattr(result, "raw_data", None)
@@ -50,9 +58,9 @@ def _score_from_result(result, graph):
     return max(_cut_score(graph, sample.state) for sample in samples)
 
 
-def _make_job(problem, algorithm, shots):
+def _make_job(problem, algorithm, shots, aqo_time=_ANNEALING_TIME):
     if algorithm == "aqo":
-        return problem.aqo_job(tmax=_ANNEALING_TIME, nbshots=0)
+        return problem.aqo_job(tmax=aqo_time, nbshots=0)
     if algorithm == "sa":
         return problem.sqa_job(tmax=_ANNEALING_TIME, nbshots=shots)
     if algorithm == "sqa":
@@ -78,8 +86,23 @@ def run(
     iterator,
     seed,
     shots=_DEFAULT_SHOTS,
+    aqo_time=_ANNEALING_TIME,
 ):
     """Execute the same graph-size QScore search using AQO or SA jobs."""
+    if not isinstance(algorithm, str) or algorithm not in {"aqo", "sa", "sqa"}:
+        raise ValueError(f"Unsupported annealing algorithm: {algorithm!r}.")
+    check_parameters_value(initial_size, size_limit, beta, iterator, 1, seed)
+    if algorithm in {"sa", "sqa"} and (
+        isinstance(shots, bool) or not isinstance(shots, Integral) or shots < 1
+    ):
+        raise ValueError("shots must be a positive integer.")
+    if (
+        isinstance(aqo_time, bool)
+        or not isinstance(aqo_time, Real)
+        or not math.isfinite(aqo_time)
+        or aqo_time <= 0
+    ):
+        raise ValueError("aqo_time must be a finite positive number.")
     all_data = {}
     evaluations = {}
     next_seed = seed if seed is not None else int(np.random.randint(100000))
@@ -111,11 +134,15 @@ def run(
 
             next_seed = max(next_seed, graph_seed + 1)
             problem = MaxCut(graph)
-            job = _make_job(problem, algorithm, shots)
+            job = _make_job(problem, algorithm, shots, aqo_time=aqo_time)
+            started = time.perf_counter()
             result = qpu.submit(job)
+            duration = time.perf_counter() - started
             score = _score_from_result(result, graph)
             scores.append(score)
-            instances.append({"seed": graph_seed, "score": score})
+            instances.append(
+                {"seed": graph_seed, "score": score, "duration_seconds": duration}
+            )
 
         average_score = float(np.mean(scores) - size * (size - 1) / 8)
         random_best_score = float(0.178 * size ** 1.5)
@@ -126,6 +153,7 @@ def run(
             "random_best_score": random_best_score,
             "ratio": ratio,
             "success": ratio > beta,
+            "instance_duration_sum": sum(row["duration_seconds"] for row in instances),
         }
         print(
             f"{algorithm.upper()} n={size}: score={average_score:.2f}, "

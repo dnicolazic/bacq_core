@@ -59,6 +59,7 @@ class ProtocolTests(unittest.TestCase):
             ("depth", True, ValueError),
             ("seed", True, TypeError),
             ("seed", "42", TypeError),
+            ("seed", -1, ValueError),
         )
         for name, value, error in invalid_cases:
             with self.subTest(parameter=name, value=value):
@@ -233,6 +234,10 @@ class ExperimentTests(unittest.TestCase):
                 self.assertEqual(result["device"], device)
                 self.assertEqual(result["result"], VALID_REPORT)
                 self.assertEqual(run_annealing.call_args.args[:2], (qpu, algorithm))
+                self.assertEqual(
+                    run_annealing.call_args.kwargs["aqo_time"],
+                    annealing._ANNEALING_TIME,
+                )
 
     def test_invalid_parameters_do_not_start_qscore(self):
         params = {**VALID_PARAMETERS, "depth": 0}
@@ -266,7 +271,39 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(result["device"], "CLinalg")
         self.assertIn(result["result"]["status"], {"above_limit", "below_initial"})
         self.assertEqual(len(result["result"]["raw_data"][2]), 1)
+        instance = result["result"]["raw_data"][2][0]
+        self.assertGreaterEqual(instance["duration_seconds"], 0.0)
+        self.assertEqual(
+            result["result"]["evaluations"][2]["instance_duration_sum"],
+            instance["duration_seconds"],
+        )
         json.dumps(result)
+
+    def test_qaoa_saves_measured_instance_and_per_size_submission_durations(self):
+        from tempfile import TemporaryDirectory
+        import qat.qscore.benchmark as qscore_benchmark
+
+        qpu = MagicMock()
+        qpu.submit.return_value = SimpleNamespace(value=-2.0)
+        with (
+            TemporaryDirectory() as directory,
+            patch.object(qscore_benchmark, "_NB_INSTANCES_PER_SIZE", 2),
+            patch.object(qscore_benchmark, "generate_maxcut_job"),
+            patch.object(
+                qscore_benchmark.time, "perf_counter",
+                side_effect=[10.0, 12.0, 20.0, 23.0],
+            ),
+        ):
+            report = qscore_benchmark.QScore(
+                qpu, initial_size=2, size_limit=2, beta=0.2,
+                iterator="exhaustive", seed=42,
+                output=str(Path(directory) / "qscore.csv"),
+                rawdata=str(Path(directory) / "qscore.raw"),
+            ).run()
+        self.assertEqual(
+            [row["duration_seconds"] for row in report["raw_data"][2]], [2.0, 3.0]
+        )
+        self.assertEqual(report["evaluations"][2]["instance_duration_sum"], 5.0)
 
     def test_qutip_qpu_uses_aqo_jobs(self):
         qpu = MagicMock(name="QutipQPU")
@@ -277,21 +314,68 @@ class ExperimentTests(unittest.TestCase):
             "size_limit": 2,
             "iterator": "exhaustive",
             "qutip_steps": 12,
+            "qutip_tmax": 7.5,
         }
         with (
             patch.object(experiment, "_build_qutip_qpu", return_value=qpu) as build_qpu,
             patch.object(annealing, "_NB_INSTANCES_PER_SIZE", 1),
+            patch.object(annealing.time, "perf_counter", side_effect=[10.0, 12.5]),
         ):
             result = experiment.run("QutipQPU", **params)
 
         build_qpu.assert_called_once_with(params)
         job = qpu.submit.call_args.args[0]
         self.assertIsNotNone(job.schedule)
+        self.assertEqual(job.schedule.tmax, 7.5)
         self.assertEqual(result["device"], "QutipQPU")
         self.assertEqual(result["parameters"]["qutip_steps"], 12)
+        self.assertEqual(result["parameters"]["qutip_tmax"], 7.5)
+        self.assertEqual(result["result"]["raw_data"][2][0]["duration_seconds"], 2.5)
+        self.assertEqual(
+            result["result"]["evaluations"][2]["instance_duration_sum"], 2.5
+        )
         self.assertIn(result["result"]["status"], {"boundary", "above_limit", "below_initial"})
         self.assertEqual(len(result["result"]["raw_data"][2]), 1)
         json.dumps(result)
+
+    def test_qutip_default_evolution_time_passes_size_five_on_real_emulator(self):
+        params = {
+            **VALID_PARAMETERS,
+            "initial_size": 5,
+            "size_limit": 5,
+            "iterator": "exhaustive",
+        }
+        # The previous tmax=1.0 produced ratio=0.159 and stopped at size 5.
+        for tmax, expected_success in ((None, True), (1.0, False)):
+            with self.subTest(tmax=tmax):
+                overrides = {} if tmax is None else {"qutip_tmax": tmax}
+                with patch.object(annealing, "_NB_INSTANCES_PER_SIZE", 100):
+                    result = experiment.run("QutipQPU", **params, **overrides)
+                evaluation = result["result"]["evaluations"][5]
+                self.assertEqual(
+                    result["parameters"]["qutip_tmax"],
+                    5.0 if tmax is None else tmax,
+                )
+                self.assertEqual(len(result["result"]["raw_data"][5]), 100)
+                self.assertEqual(evaluation["success"], expected_success)
+                if expected_success:
+                    self.assertGreater(evaluation["ratio"], 0.55)
+                    self.assertLess(evaluation["ratio"], 0.65)
+                    self.assertEqual(result["result"]["status"], "above_limit")
+                else:
+                    self.assertAlmostEqual(evaluation["ratio"], 0.1585, places=3)
+                    self.assertEqual(result["result"]["status"], "below_initial")
+
+    def test_invalid_aqo_evolution_time_is_rejected_before_submission(self):
+        qpu = MagicMock(name="QutipQPU")
+        for tmax in (True, None, "5", 0, -1, float("nan"), float("inf")):
+            with (
+                self.subTest(tmax=tmax),
+                patch.object(experiment, "_build_qutip_qpu", return_value=qpu),
+                self.assertRaisesRegex(ValueError, "aqo_time"),
+            ):
+                experiment.run("QutipQPU", **VALID_PARAMETERS, qutip_tmax=tmax)
+        qpu.submit.assert_not_called()
 
     def test_annealing_sample_state_maps_to_maxcut_score(self):
         graph = nx.Graph([(0, 1), (1, 2)])
@@ -300,6 +384,42 @@ class ExperimentTests(unittest.TestCase):
             raw_data=[SimpleNamespace(state=0b101)],
         )
         self.assertEqual(annealing._score_from_result(result, graph), 2.0)
+
+    def test_annealing_rejects_out_of_range_sample_states(self):
+        for state in (-1, 0b100):
+            with self.subTest(state=state), self.assertRaisesRegex(
+                ValueError, "state space"
+            ):
+                annealing._state_bits(state, 2)
+
+    def test_annealing_rejects_non_finite_energy(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "must be finite"
+            ):
+                annealing._score_from_result(SimpleNamespace(value=value), nx.Graph())
+
+    def test_annealing_validates_algorithm_and_shots_before_submission(self):
+        qpu = MagicMock(name="annealing QPU")
+        for algorithm, shots in (
+            ("unknown", 1),
+            ([], 1),
+            ("sqa", 0),
+            ("sa", True),
+        ):
+            with self.subTest(algorithm=algorithm, shots=shots):
+                with self.assertRaises(ValueError):
+                    annealing.run(
+                        qpu,
+                        algorithm,
+                        initial_size=2,
+                        size_limit=2,
+                        beta=0.2,
+                        iterator="exhaustive",
+                        seed=42,
+                        shots=shots,
+                    )
+        qpu.submit.assert_not_called()
 
     def test_sqa_job_has_linear_transverse_field_schedule(self):
         from qat.core.variables import Variable

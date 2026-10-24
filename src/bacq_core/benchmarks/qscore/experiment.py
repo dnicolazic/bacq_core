@@ -128,6 +128,11 @@ def _run_annealing(device, params):
         iterator=params["iterator"],
         seed=params["seed"],
         shots=params.get("shots", annealing._DEFAULT_SHOTS),
+        aqo_time=(
+            params.get("qutip_tmax", 5.0)
+            if device == "QutipQPU"
+            else annealing._ANNEALING_TIME
+        ),
     )
 
 
@@ -188,6 +193,7 @@ def run(device, **params):
     }
     if device == "QutipQPU":
         run_parameters["qutip_steps"] = params.get("qutip_steps", 100)
+        run_parameters["qutip_tmax"] = params.get("qutip_tmax", 5.0)
     elif device == "SimulatedAnnealing":
         run_parameters.update(
             annealing_steps=params.get("annealing_steps", 50),
