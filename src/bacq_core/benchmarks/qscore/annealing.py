@@ -55,6 +55,16 @@ def _make_job(problem, algorithm, shots):
         return problem.aqo_job(tmax=_ANNEALING_TIME, nbshots=0)
     if algorithm == "sa":
         return problem.sqa_job(tmax=_ANNEALING_TIME, nbshots=shots)
+    if algorithm == "sqa":
+        from qat.core.variables import Variable
+
+        time = Variable("t", float)
+        gamma_t = 1.0 - time
+        return problem.sqa_job(
+            gamma_t=gamma_t,
+            tmax=_ANNEALING_TIME,
+            nbshots=shots,
+        )
     raise ValueError(f"Unsupported annealing algorithm: {algorithm!r}.")
 
 

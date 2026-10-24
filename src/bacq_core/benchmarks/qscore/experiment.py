@@ -8,7 +8,13 @@ from . import annealing
 from .helpers_protocol import check_parameters_value
 
 
-_SUPPORTED_DEVICES = {"CLinalg", "QutipQPU", "SimulatedAnnealing"}
+_QAOA_DEVICES = {"CLinalg", "MPS", "MPSTraj"}
+_SUPPORTED_DEVICES = _QAOA_DEVICES | {
+    "QutipQPU",
+    "AnalogQPU",
+    "SQAQPU",
+    "SimulatedAnnealing",
+}
 
 
 def _build_clinalg_qpu():
@@ -20,6 +26,35 @@ def _build_clinalg_qpu():
         tol=1e-4,
         options={"maxiter": 300},
     ) | CLinalg()
+
+
+def _build_qaptiva_variational_qpu(device):
+    try:
+        from qlmaas.qpus import MPS, MPSTraj
+    except ImportError as error:
+        raise ImportError(
+            f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
+        ) from error
+
+    qpu_type = {"MPS": MPS, "MPSTraj": MPSTraj}[device]
+    from qat.vsolve.optimize import ScipyMinimizePlugin
+
+    return ScipyMinimizePlugin(
+        method="COBYLA",
+        tol=1e-4,
+        options={"maxiter": 300},
+    ) | qpu_type()
+
+
+def _build_qaptiva_annealing_qpu(device):
+    try:
+        from qlmaas.qpus import AnalogQPU, SQAQPU
+    except ImportError as error:
+        raise ImportError(
+            f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
+        ) from error
+
+    return {"AnalogQPU": AnalogQPU, "SQAQPU": SQAQPU}[device]()
 
 
 def _build_qutip_qpu(params):
@@ -78,6 +113,9 @@ def _run_annealing(device, params):
     if device == "QutipQPU":
         qpu = _build_qutip_qpu(params)
         algorithm = "aqo"
+    elif device in {"AnalogQPU", "SQAQPU"}:
+        qpu = _build_qaptiva_annealing_qpu(device)
+        algorithm = "aqo" if device == "AnalogQPU" else "sqa"
     else:
         qpu = _build_simulated_annealing_qpu(params, params["seed"])
         algorithm = "sa"
@@ -109,8 +147,12 @@ def run(device, **params):
     seed = params["seed"]
     check_parameters_value(initial_size, size_limit, beta, iterator, depth, seed)
 
-    if device == "CLinalg":
-        qpu = _build_clinalg_qpu()
+    if device in _QAOA_DEVICES:
+        qpu = (
+            _build_clinalg_qpu()
+            if device == "CLinalg"
+            else _build_qaptiva_variational_qpu(device)
+        )
         with TemporaryDirectory(prefix="bacq-qscore-") as output_dir:
             output_path = Path(output_dir)
             report = _new_qscore(
@@ -153,6 +195,8 @@ def run(device, **params):
             temperature_min=params.get("temperature_min", 0.1),
             temperature_max=params.get("temperature_max", 5.0),
         )
+    elif device == "SQAQPU":
+        run_parameters["shots"] = params.get("shots", annealing._DEFAULT_SHOTS)
 
     return {
         "filetype": "experiment",

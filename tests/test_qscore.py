@@ -185,6 +185,55 @@ class ExperimentTests(unittest.TestCase):
                 experiment.run("PyLinalg", **VALID_PARAMETERS)
         qscore_factory.assert_not_called()
 
+    def test_remote_variational_devices_use_qscore_core(self):
+        for device in ("MPS", "MPSTraj"):
+            with self.subTest(device=device):
+                qpu = MagicMock(name=f"{device} QPU")
+                qscore = MagicMock(name="QScore instance")
+                qscore.run.return_value = VALID_REPORT
+                with (
+                    patch.object(
+                        experiment,
+                        "_build_qaptiva_variational_qpu",
+                        return_value=qpu,
+                    ) as build_qpu,
+                    patch.object(
+                        experiment, "_new_qscore", return_value=qscore
+                    ) as qscore_factory,
+                ):
+                    result = experiment.run(device, **VALID_PARAMETERS)
+
+                self.assertEqual(result["device"], device)
+                self.assertEqual(result["result"], VALID_REPORT)
+                build_qpu.assert_called_once_with(device)
+                self.assertIs(qscore_factory.call_args.args[0], qpu)
+                qscore.run.assert_called_once_with()
+
+    def test_remote_annealers_select_matching_search_algorithms(self):
+        for device, algorithm in (
+            ("AnalogQPU", "aqo"),
+            ("SQAQPU", "sqa"),
+        ):
+            with self.subTest(device=device):
+                qpu = MagicMock(name=f"{device} QPU")
+                with (
+                    patch.object(
+                        experiment,
+                        "_build_qaptiva_annealing_qpu",
+                        return_value=qpu,
+                    ),
+                    patch.object(
+                        experiment.annealing,
+                        "run",
+                        return_value=VALID_REPORT,
+                    ) as run_annealing,
+                ):
+                    result = experiment.run(device, **VALID_PARAMETERS)
+
+                self.assertEqual(result["device"], device)
+                self.assertEqual(result["result"], VALID_REPORT)
+                self.assertEqual(run_annealing.call_args.args[:2], (qpu, algorithm))
+
     def test_invalid_parameters_do_not_start_qscore(self):
         params = {**VALID_PARAMETERS, "depth": 0}
         with patch.object(experiment, "_new_qscore") as qscore_factory:
@@ -251,6 +300,20 @@ class ExperimentTests(unittest.TestCase):
             raw_data=[SimpleNamespace(state=0b101)],
         )
         self.assertEqual(annealing._score_from_result(result, graph), 2.0)
+
+    def test_sqa_job_has_linear_transverse_field_schedule(self):
+        from qat.core.variables import Variable
+
+        problem = MagicMock(name="MaxCut problem")
+        annealing._make_job(problem, "sqa", shots=7)
+
+        kwargs = problem.sqa_job.call_args.kwargs
+        self.assertEqual(kwargs["tmax"], annealing._ANNEALING_TIME)
+        self.assertEqual(kwargs["nbshots"], 7)
+        self.assertEqual(
+            str(kwargs["gamma_t"]),
+            str(1.0 - Variable("t", float)),
+        )
 
     def test_qutip_qpu_is_constructed_with_requested_steps(self):
         with patch("qat.analog.qutip_qpu.QutipQPU") as qutip_class:
