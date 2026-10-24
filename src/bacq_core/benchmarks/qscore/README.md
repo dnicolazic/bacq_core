@@ -12,11 +12,11 @@ devices. The QutipQPU path requires the myQLM analog/Qutip simulator
 dependencies. SimulatedAnnealing is imported from
 `qat.simulated_annealing`.
 
-In the current development environment, a real QutipQPU AQO submission is
-blocked by a myQLM package mismatch: the installed `qat.fermion` imports
-`qat.qpus.get_default_qpu`, which is not exposed by the installed `qat.qpus`.
-The adapter and AQO job construction are covered by tests, but the real Qutip
-execution needs a compatible myQLM/Qutip package set.
+When using a local `qscore` checkout, do not put the checkout root first on
+`PYTHONPATH`: its `qat/__init__.py` shadows myQLM's compiled `qat` package, and
+QutipQPU then fails with `ImportError: cannot import name 'get_default_qpu'
+from 'qat.qpus'`. Install `qat-qscore` (it only ships `qat.qscore`) or append
+`qscore/qat` to the already-imported `qat.__path__`.
 
 ## Install
 
