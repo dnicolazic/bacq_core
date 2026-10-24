@@ -2,11 +2,11 @@
 
 This BACQ benchmark runs the QScore implementation from the separate
 `dnicolazic/qscore` repository. QScore creates the random MaxCut instances,
-constructs QAOA jobs, executes them on myQLM's local `PyLinalg` emulator, and
+constructs QAOA jobs, executes them on myQLM's local `CLinalg` emulator, and
 computes the QScore boundary. BACQ starts the run and stores the experiment and
 benchmark result using its regular output format.
 
-This integration currently supports only the local `PyLinalg` emulator. It
+This integration currently supports only the local `CLinalg` emulator. It
 does not run on the Qiskit IBM devices used by some other BACQ benchmarks.
 
 ## Install
@@ -25,7 +25,7 @@ from BACQ's required dependencies.
 ## Run
 
 Use a BACQ protocol input with `"benchmark": "qscore"` and `"device":
-"PyLinalg"`. For example:
+"CLinalg"`. For example:
 
 ```bash
 python src/bacq_core/main.py protocol_qscore.json

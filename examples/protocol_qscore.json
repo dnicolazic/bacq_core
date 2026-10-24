@@ -1,7 +1,7 @@
 {
     "filetype": "protocol",
     "benchmark": "qscore",
-    "device": "PyLinalg",
+    "device": "CLinalg",
     "parameters": {
         "initial_size": 5,
         "size_limit": 6,

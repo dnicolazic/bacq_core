@@ -1,16 +1,16 @@
-"""Run QScore on the myQLM PyLinalg emulator."""
+"""Run QScore on the myQLM CLinalg emulator."""
 
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
-from qat.pylinalg import PyLinalg
+from qat.clinalg import CLinalg
 from qat.vsolve.optimize import ScipyMinimizePlugin
 from qat.qscore.benchmark import QScore
 
 from .helpers_protocol import check_parameters_value
 
 
-_MYQLM_EMULATOR = "PyLinalg"
+_MYQLM_EMULATOR = "CLinalg"
 
 
 def run(device, **params):
@@ -32,7 +32,7 @@ def run(device, **params):
         method="COBYLA",
         tol=1e-4,
         options={"maxiter": 300},
-    ) | PyLinalg()
+    ) | CLinalg()
 
     with TemporaryDirectory(prefix="bacq-qscore-") as output_dir:
         output_path = Path(output_dir)

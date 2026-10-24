@@ -1,4 +1,4 @@
-"""BACQ integration for the QScore MaxCut benchmark using myQLM PyLinalg."""
+"""BACQ integration for the QScore MaxCut benchmark using myQLM CLinalg."""
 
 from bacq_core.parameters import Parameter, ParameterSet
 
