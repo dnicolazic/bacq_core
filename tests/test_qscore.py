@@ -1,11 +1,19 @@
 """QScore integration tests; requires the project's [qscore] extra."""
 
 import json
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bacq_core.benchmarks.qscore import evaluate, experiment, helpers_protocol
+import networkx as nx
+
+from bacq_core.benchmarks.qscore import (
+    annealing,
+    evaluate,
+    experiment,
+    helpers_protocol,
+)
 
 
 VALID_PARAMETERS = {
@@ -100,34 +108,33 @@ class EvaluationTests(unittest.TestCase):
 
 class ExperimentTests(unittest.TestCase):
     def _run_with_mocks(self, report=VALID_REPORT):
-        emulator = MagicMock(name="CLinalg instance")
-        optimizer = MagicMock(name="optimizer")
         composed_qpu = MagicMock(name="composed QPU")
-        optimizer.__or__.return_value = composed_qpu
         qscore = MagicMock(name="QScore instance")
         qscore.run.return_value = report
 
         with (
-            patch.object(experiment, "CLinalg", return_value=emulator) as clinalg,
             patch.object(
-                experiment, "ScipyMinimizePlugin", return_value=optimizer
-            ) as plugin,
-            patch.object(experiment, "QScore", return_value=qscore) as qscore_class,
+                experiment, "_build_clinalg_qpu", return_value=composed_qpu
+            ) as build_qpu,
+            patch.object(experiment, "_new_qscore", return_value=qscore) as qscore_factory,
         ):
             result = experiment.run("CLinalg", **VALID_PARAMETERS)
 
-        return result, emulator, optimizer, composed_qpu, qscore, clinalg, plugin, qscore_class
+        return (
+            result,
+            composed_qpu,
+            qscore,
+            build_qpu,
+            qscore_factory,
+        )
 
     def test_runs_qscore_with_clinalg_and_returns_bacq_experiment(self):
         (
             result,
-            emulator,
-            optimizer,
             composed_qpu,
             qscore,
-            clinalg,
-            plugin,
-            qscore_class,
+            build_qpu,
+            qscore_factory,
         ) = self._run_with_mocks()
 
         self.assertEqual(result["filetype"], "experiment")
@@ -135,18 +142,14 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(result["device"], "CLinalg")
         self.assertEqual(result["result"], VALID_REPORT)
         self.assertEqual(result["parameters"], VALID_PARAMETERS)
-        clinalg.assert_called_once_with()
-        plugin.assert_called_once_with(
-            method="COBYLA", tol=1e-4, options={"maxiter": 300}
-        )
-        optimizer.__or__.assert_called_once_with(emulator)
-        qscore_class.assert_called_once()
-        self.assertIs(qscore_class.call_args.args[0], composed_qpu)
+        build_qpu.assert_called_once_with()
+        qscore_factory.assert_called_once()
+        self.assertIs(qscore_factory.call_args.args[0], composed_qpu)
         qscore.run.assert_called_once_with()
 
     def test_qscore_output_files_use_temporary_directory(self):
-        _, _, _, _, _, _, _, qscore_class = self._run_with_mocks()
-        kwargs = qscore_class.call_args.kwargs
+        _, _, _, _, qscore_factory = self._run_with_mocks()
+        kwargs = qscore_factory.call_args.kwargs
         self.assertTrue(kwargs["output"].endswith("/qscore.csv"))
         self.assertTrue(kwargs["rawdata"].endswith("/qscore.raw"))
         self.assertIn("bacq-qscore-", kwargs["output"])
@@ -155,23 +158,45 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(kwargs["seed"], VALID_PARAMETERS["seed"])
         self.assertFalse(Path(kwargs["output"]).parent.exists())
 
+    def test_clinalg_composes_optimizer_with_emulator(self):
+        emulator = MagicMock(name="CLinalg instance")
+        optimizer = MagicMock(name="optimizer")
+        composed_qpu = MagicMock(name="composed QPU")
+        optimizer.__or__.return_value = composed_qpu
+        with (
+            patch("qat.clinalg.CLinalg", return_value=emulator) as clinalg,
+            patch(
+                "qat.vsolve.optimize.ScipyMinimizePlugin",
+                return_value=optimizer,
+            ) as plugin,
+        ):
+            result = experiment._build_clinalg_qpu()
+
+        self.assertIs(result, composed_qpu)
+        clinalg.assert_called_once_with()
+        plugin.assert_called_once_with(
+            method="COBYLA", tol=1e-4, options={"maxiter": 300}
+        )
+        optimizer.__or__.assert_called_once_with(emulator)
+
     def test_other_devices_are_not_supported(self):
-        with patch.object(experiment, "QScore") as qscore_class:
+        with patch.object(experiment, "_new_qscore") as qscore_factory:
             with self.assertRaisesRegex(NotImplementedError, "CLinalg"):
                 experiment.run("PyLinalg", **VALID_PARAMETERS)
-        qscore_class.assert_not_called()
+        qscore_factory.assert_not_called()
 
     def test_invalid_parameters_do_not_start_qscore(self):
         params = {**VALID_PARAMETERS, "depth": 0}
-        with patch.object(experiment, "QScore") as qscore_class:
+        with patch.object(experiment, "_new_qscore") as qscore_factory:
             with self.assertRaises(ValueError):
                 experiment.run("CLinalg", **params)
-        qscore_class.assert_not_called()
+        qscore_factory.assert_not_called()
 
     def test_incompatible_qscore_result_api_has_clear_error(self):
         old_api_report = {"status": "boundary"}
-        with patch.object(experiment, "QScore") as qscore_class:
-            qscore_class.return_value.run.return_value = old_api_report
+        qscore = MagicMock()
+        qscore.run.return_value = old_api_report
+        with patch.object(experiment, "_new_qscore", return_value=qscore):
             with self.assertRaisesRegex(RuntimeError, "structured run results"):
                 experiment.run("CLinalg", **VALID_PARAMETERS)
 
@@ -192,6 +217,70 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(result["device"], "CLinalg")
         self.assertIn(result["result"]["status"], {"above_limit", "below_initial"})
         self.assertEqual(len(result["result"]["raw_data"][2]), 1)
+        json.dumps(result)
+
+    def test_qutip_qpu_uses_aqo_jobs(self):
+        qpu = MagicMock(name="QutipQPU")
+        qpu.submit.return_value = SimpleNamespace(value=-1.5, raw_data=[])
+        params = {
+            **VALID_PARAMETERS,
+            "initial_size": 2,
+            "size_limit": 2,
+            "iterator": "exhaustive",
+            "qutip_steps": 12,
+        }
+        with (
+            patch.object(experiment, "_build_qutip_qpu", return_value=qpu) as build_qpu,
+            patch.object(annealing, "_NB_INSTANCES_PER_SIZE", 1),
+        ):
+            result = experiment.run("QutipQPU", **params)
+
+        build_qpu.assert_called_once_with(params)
+        job = qpu.submit.call_args.args[0]
+        self.assertIsNotNone(job.schedule)
+        self.assertEqual(result["device"], "QutipQPU")
+        self.assertEqual(result["parameters"]["qutip_steps"], 12)
+        self.assertIn(result["result"]["status"], {"boundary", "above_limit", "below_initial"})
+        self.assertEqual(len(result["result"]["raw_data"][2]), 1)
+        json.dumps(result)
+
+    def test_annealing_sample_state_maps_to_maxcut_score(self):
+        graph = nx.Graph([(0, 1), (1, 2)])
+        result = SimpleNamespace(
+            value=None,
+            raw_data=[SimpleNamespace(state=0b101)],
+        )
+        self.assertEqual(annealing._score_from_result(result, graph), 2.0)
+
+    def test_qutip_qpu_is_constructed_with_requested_steps(self):
+        with patch("qat.analog.qutip_qpu.QutipQPU") as qutip_class:
+            qpu = experiment._build_qutip_qpu({"qutip_steps": 12})
+        qutip_class.assert_called_once_with(n_steps=12)
+        self.assertIs(qpu, qutip_class.return_value)
+
+    def test_simulated_annealing_runs_real_small_maxcut_job(self):
+        with patch.object(annealing, "_NB_INSTANCES_PER_SIZE", 1):
+            result = experiment.run(
+                "SimulatedAnnealing",
+                initial_size=2,
+                size_limit=2,
+                beta=0.2,
+                iterator="exhaustive",
+                depth=1,
+                seed=42,
+                annealing_steps=10,
+                shots=5,
+            )
+
+        self.assertEqual(result["device"], "SimulatedAnnealing")
+        self.assertEqual(result["parameters"]["annealing_steps"], 10)
+        self.assertEqual(result["parameters"]["shots"], 5)
+        self.assertIn(
+            result["result"]["status"],
+            {"boundary", "above_limit", "below_initial"},
+        )
+        self.assertEqual(len(result["result"]["raw_data"][2]), 1)
+        self.assertIsInstance(result["result"]["raw_data"][2][0]["score"], float)
         json.dumps(result)
 
 

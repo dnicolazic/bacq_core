@@ -1,13 +1,22 @@
-# BACQ-OP-QSCORE with the myQLM emulator
+# BACQ-OP-QSCORE with myQLM simulators
 
 This BACQ benchmark runs the QScore implementation from the separate
-`dnicolazic/qscore` repository. QScore creates the random MaxCut instances,
-constructs QAOA jobs, executes them on myQLM's local `CLinalg` emulator, and
-computes the QScore boundary. BACQ starts the run and stores the experiment and
-benchmark result using its regular output format.
+`dnicolazic/qscore` repository on `CLinalg`. It also supports two local
+annealing modes, implemented in BACQ with the same graph-size search and QScore
+metric: myQLM's `QutipQPU` uses analog quantum optimization (AQO) jobs, and
+`SimulatedAnnealing` uses MaxCut annealing jobs. These modes do not execute
+QScore's QAOA circuits.
 
-This integration currently supports only the local `CLinalg` emulator. It
-does not run on the Qiskit IBM devices used by some other BACQ benchmarks.
+All three devices are local emulators; they do not use BACQ's Qiskit IBM
+devices. The QutipQPU path requires the myQLM analog/Qutip simulator
+dependencies. SimulatedAnnealing is imported from
+`qat.simulated_annealing`.
+
+In the current development environment, a real QutipQPU AQO submission is
+blocked by a myQLM package mismatch: the installed `qat.fermion` imports
+`qat.qpus.get_default_qpu`, which is not exposed by the installed `qat.qpus`.
+The adapter and AQO job construction are covered by tests, but the real Qutip
+execution needs a compatible myQLM/Qutip package set.
 
 ## Install
 
@@ -24,16 +33,21 @@ from BACQ's required dependencies.
 
 ## Run
 
-Use a BACQ protocol input with `"benchmark": "qscore"` and `"device":
-"CLinalg"`. For example:
+Use a BACQ protocol input with `"benchmark": "qscore"`. Set `"device"` to
+`"CLinalg"`, `"QutipQPU"`, or `"SimulatedAnnealing"`. The included example
+protocols use small graph sizes:
 
 ```bash
-python src/bacq_core/main.py protocol_qscore.json
+python src/bacq_core/main.py examples/protocol_qscore.json
+python src/bacq_core/main.py examples/protocol_qscore_qutip.json
+python src/bacq_core/main.py examples/protocol_qscore_simulated_annealing.json
 ```
 
-The supplied `examples/protocol_qscore.json` uses a small graph-size range as
-an example. QScore evaluates 100 random graph instances for each tested size,
-so even emulator runs can take time. Increase `size_limit` for a larger sweep.
+Each mode evaluates 100 random graph instances per tested size by default, so
+even emulator runs can take time. Increase `size_limit` for a larger sweep.
+`depth` is used for the QAOA/CLinalg path and ignored by the annealing devices.
+The workbench runner also allows reducing instances and changing emulator
+steps/shots for fast experiments.
 
 Parameters:
 

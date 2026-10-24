@@ -1,4 +1,4 @@
-"""BACQ integration for the QScore MaxCut benchmark using myQLM CLinalg."""
+"""BACQ integration for QScore MaxCut on myQLM simulators."""
 
 from bacq_core.parameters import Parameter, ParameterSet
 
@@ -13,7 +13,11 @@ parameters = ParameterSet([
     Parameter(name="size_limit", constraint=int, description="Largest MaxCut graph size to benchmark"),
     Parameter(name="beta", constraint=float, description="QScore threshold ratio"),
     Parameter(name="iterator", constraint=str, description="Size search method: 'exhaustive' or 'dichotomic'"),
-    Parameter(name="depth", constraint=int, description="QAOA ansatz depth"),
+    Parameter(
+        name="depth",
+        constraint=int,
+        description="QAOA ansatz depth (used by CLinalg; ignored by annealers)",
+    ),
     Parameter(name="seed", constraint=int, description="Random seed for reproducible graph generation"),
 ])
 

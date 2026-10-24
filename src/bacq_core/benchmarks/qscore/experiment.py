@@ -1,23 +1,104 @@
-"""Run QScore on the myQLM CLinalg emulator."""
+"""Run QScore using myQLM simulators."""
 
+import math
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
-from qat.clinalg import CLinalg
-from qat.vsolve.optimize import ScipyMinimizePlugin
-from qat.qscore.benchmark import QScore
-
+from . import annealing
 from .helpers_protocol import check_parameters_value
 
 
-_MYQLM_EMULATOR = "CLinalg"
+_SUPPORTED_DEVICES = {"CLinalg", "QutipQPU", "SimulatedAnnealing"}
+
+
+def _build_clinalg_qpu():
+    from qat.clinalg import CLinalg
+    from qat.vsolve.optimize import ScipyMinimizePlugin
+
+    return ScipyMinimizePlugin(
+        method="COBYLA",
+        tol=1e-4,
+        options={"maxiter": 300},
+    ) | CLinalg()
+
+
+def _build_qutip_qpu(params):
+    steps = params.get("qutip_steps", 100)
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+        raise ValueError("qutip_steps must be a positive integer.")
+    try:
+        from qat.analog.qutip_qpu import QutipQPU
+    except ImportError as error:
+        raise ImportError(
+            "QutipQPU requires myQLM's analog/Qutip simulator dependencies."
+        ) from error
+    return QutipQPU(n_steps=steps)
+
+
+def _build_simulated_annealing_qpu(params, seed):
+    from qat.core.variables import Variable
+    from qat.simulated_annealing import SimulatedAnnealing
+
+    steps = params.get("annealing_steps", 50)
+    temperature_min = params.get("temperature_min", 0.1)
+    temperature_max = params.get("temperature_max", 5.0)
+    shots = params.get("shots", annealing._DEFAULT_SHOTS)
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+        raise ValueError("annealing_steps must be a positive integer.")
+    if isinstance(shots, bool) or not isinstance(shots, int) or shots < 1:
+        raise ValueError("shots must be a positive integer.")
+    if (
+        isinstance(temperature_min, bool)
+        or not isinstance(temperature_min, (int, float))
+        or not math.isfinite(temperature_min)
+        or temperature_min <= 0
+    ):
+        raise ValueError("temperature_min must be a finite positive number.")
+    if (
+        isinstance(temperature_max, bool)
+        or not isinstance(temperature_max, (int, float))
+        or not math.isfinite(temperature_max)
+        or temperature_max <= temperature_min
+    ):
+        raise ValueError(
+            "temperature_max must be finite and greater than temperature_min."
+        )
+    time = Variable("t", float)
+    temperature = temperature_min * time + temperature_max * (1 - time)
+    return SimulatedAnnealing(temp_t=temperature, n_steps=steps, seed=seed)
+
+
+def _new_qscore(qpu, **kwargs):
+    from qat.qscore.benchmark import QScore
+
+    return QScore(qpu, **kwargs)
+
+
+def _run_annealing(device, params):
+    if device == "QutipQPU":
+        qpu = _build_qutip_qpu(params)
+        algorithm = "aqo"
+    else:
+        qpu = _build_simulated_annealing_qpu(params, params["seed"])
+        algorithm = "sa"
+    return annealing.run(
+        qpu,
+        algorithm,
+        initial_size=params["initial_size"],
+        size_limit=params["size_limit"],
+        beta=params["beta"],
+        iterator=params["iterator"],
+        seed=params["seed"],
+        shots=params.get("shots", annealing._DEFAULT_SHOTS),
+    )
 
 
 def run(device, **params):
-    """Run the QScore core benchmark on the local myQLM emulator."""
-    if device != _MYQLM_EMULATOR:
+    """Run QScore with its QAOA core or one of the supported annealers."""
+    if device not in _SUPPORTED_DEVICES:
         raise NotImplementedError(
-            f"QScore integration currently supports only {_MYQLM_EMULATOR!r}, got {device!r}."
+            f"Unsupported QScore device {device!r}. "
+            f"Choose one of {sorted(_SUPPORTED_DEVICES)}."
         )
 
     initial_size = params["initial_size"]
@@ -28,44 +109,55 @@ def run(device, **params):
     seed = params["seed"]
     check_parameters_value(initial_size, size_limit, beta, iterator, depth, seed)
 
-    qpu = ScipyMinimizePlugin(
-        method="COBYLA",
-        tol=1e-4,
-        options={"maxiter": 300},
-    ) | CLinalg()
+    if device == "CLinalg":
+        qpu = _build_clinalg_qpu()
+        with TemporaryDirectory(prefix="bacq-qscore-") as output_dir:
+            output_path = Path(output_dir)
+            report = _new_qscore(
+                qpu,
+                initial_size=initial_size,
+                size_limit=size_limit,
+                beta=beta,
+                iterator=iterator,
+                depth=depth,
+                output=str(output_path / "qscore.csv"),
+                rawdata=str(output_path / "qscore.raw"),
+                seed=seed,
+            ).run()
 
-    with TemporaryDirectory(prefix="bacq-qscore-") as output_dir:
-        output_path = Path(output_dir)
-        report = QScore(
-            qpu,
-            initial_size=initial_size,
-            size_limit=size_limit,
-            beta=beta,
-            iterator=iterator,
-            depth=depth,
-            output=str(output_path / "qscore.csv"),
-            rawdata=str(output_path / "qscore.raw"),
-            seed=seed,
-        ).run()
+        required_report_fields = {
+            "status", "value", "beta", "evaluations", "raw_data"
+        }
+        if not isinstance(report, dict) or not required_report_fields.issubset(report):
+            raise RuntimeError(
+                "The installed qat-qscore version does not expose structured "
+                "run results. Install the updated myqlm-compatibility-updates branch."
+            )
+    else:
+        report = _run_annealing(device, params)
 
-    required_report_fields = {"status", "value", "beta", "evaluations", "raw_data"}
-    if not isinstance(report, dict) or not required_report_fields.issubset(report):
-        raise RuntimeError(
-            "The installed qat-qscore version does not expose structured run results. "
-            "Install the updated myqlm-compatibility-updates branch."
+    run_parameters = {
+        "initial_size": initial_size,
+        "size_limit": size_limit,
+        "beta": float(beta),
+        "iterator": iterator,
+        "depth": depth,
+        "seed": seed,
+    }
+    if device == "QutipQPU":
+        run_parameters["qutip_steps"] = params.get("qutip_steps", 100)
+    elif device == "SimulatedAnnealing":
+        run_parameters.update(
+            annealing_steps=params.get("annealing_steps", 50),
+            shots=params.get("shots", annealing._DEFAULT_SHOTS),
+            temperature_min=params.get("temperature_min", 0.1),
+            temperature_max=params.get("temperature_max", 5.0),
         )
 
     return {
         "filetype": "experiment",
         "benchmark": "qscore",
         "device": device,
-        "parameters": {
-            "initial_size": initial_size,
-            "size_limit": size_limit,
-            "beta": float(beta),
-            "iterator": iterator,
-            "depth": depth,
-            "seed": seed,
-        },
+        "parameters": run_parameters,
         "result": report,
     }

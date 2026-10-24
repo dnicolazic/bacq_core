@@ -79,9 +79,10 @@ pip install -e ".[qscore]"
 This extra installs `qat-qscore` from the `myqlm-compatibility-updates` branch
 of [dnicolazic/qscore](https://github.com/dnicolazic/qscore). It does not add
 QScore as a required dependency for other BACQ benchmarks.
-To run QScore on the myQLM `CLinalg` emulator, see
+To run QScore on the myQLM `CLinalg`, `QutipQPU`, or
+`SimulatedAnnealing` emulators, see
 [`src/bacq_core/benchmarks/qscore/README.md`](src/bacq_core/benchmarks/qscore/README.md)
-and the example protocol at [`examples/protocol_qscore.json`](examples/protocol_qscore.json).
+and the example protocols in [`examples/`](examples).
 
 ## Run a benchmark
 **From a protocol description** (i.e run with experiments on hardware)
