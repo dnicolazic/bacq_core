@@ -8,12 +8,13 @@ from . import annealing
 from .helpers_protocol import check_parameters_value
 
 
-_QAOA_DEVICES = {"CLinalg", "MPS", "MPSTraj"}
+_QAOA_DEVICES = {"CLinalg", "MPS"}
 _SUPPORTED_DEVICES = _QAOA_DEVICES | {
     "QutipQPU",
     "AnalogQPU",
     "SQAQPU",
     "SimulatedAnnealing",
+    "MPSTraj",
 }
 
 
@@ -30,20 +31,32 @@ def _build_clinalg_qpu():
 
 def _build_qaptiva_variational_qpu(device):
     try:
-        from qlmaas.qpus import MPS, MPSTraj
+        from qlmaas.qpus import MPS
     except ImportError as error:
         raise ImportError(
             f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
         ) from error
 
-    qpu_type = {"MPS": MPS, "MPSTraj": MPSTraj}[device]
     from qat.vsolve.optimize import ScipyMinimizePlugin
 
     return ScipyMinimizePlugin(
         method="COBYLA",
         tol=1e-4,
         options={"maxiter": 300},
-    ) | qpu_type()
+    ) | MPS()
+
+
+def _build_qaptiva_mpstraj_qpu(params):
+    steps = params.get("mpstraj_steps", 5000)
+    bond_dimension = params.get("mpstraj_bond_dimension", 8)
+    for name, value in (("mpstraj_steps", steps), ("mpstraj_bond_dimension", bond_dimension)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    try:
+        from qlmaas.qpus import MPSTraj
+    except ImportError as error:
+        raise ImportError("MPSTraj requires a configured QLMaaS MPSTraj QPU.") from error
+    return MPSTraj(n_steps=steps, bond_dimension=bond_dimension, seed=params["seed"])
 
 
 def _build_qaptiva_annealing_qpu(device):
@@ -110,9 +123,15 @@ def _new_qscore(qpu, **kwargs):
 
 
 def _run_annealing(device, params):
+    evolution_time = annealing._ANNEALING_TIME
     if device == "QutipQPU":
         qpu = _build_qutip_qpu(params)
         algorithm = "aqo"
+        evolution_time = params.get("qutip_tmax", 5.0)
+    elif device == "MPSTraj":
+        qpu = _build_qaptiva_mpstraj_qpu(params)
+        algorithm = "mpstraj"
+        evolution_time = params.get("mpstraj_tmax", 1000.0)
     elif device in {"AnalogQPU", "SQAQPU"}:
         qpu = _build_qaptiva_annealing_qpu(device)
         algorithm = "aqo" if device == "AnalogQPU" else "sqa"
@@ -128,11 +147,7 @@ def _run_annealing(device, params):
         iterator=params["iterator"],
         seed=params["seed"],
         shots=params.get("shots", annealing._DEFAULT_SHOTS),
-        aqo_time=(
-            params.get("qutip_tmax", 5.0)
-            if device == "QutipQPU"
-            else annealing._ANNEALING_TIME
-        ),
+        aqo_time=evolution_time,
     )
 
 
@@ -194,6 +209,13 @@ def run(device, **params):
     if device == "QutipQPU":
         run_parameters["qutip_steps"] = params.get("qutip_steps", 100)
         run_parameters["qutip_tmax"] = params.get("qutip_tmax", 5.0)
+    elif device == "MPSTraj":
+        run_parameters.update(
+            mpstraj_steps=params.get("mpstraj_steps", 5000),
+            mpstraj_bond_dimension=params.get("mpstraj_bond_dimension", 8),
+            mpstraj_tmax=params.get("mpstraj_tmax", 1000.0),
+            shots=params.get("shots", annealing._DEFAULT_SHOTS),
+        )
     elif device == "SimulatedAnnealing":
         run_parameters.update(
             annealing_steps=params.get("annealing_steps", 50),

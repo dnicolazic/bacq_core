@@ -61,6 +61,22 @@ def _score_from_result(result, graph):
 def _make_job(problem, algorithm, shots, aqo_time=_ANNEALING_TIME):
     if algorithm == "aqo":
         return problem.aqo_job(tmax=aqo_time, nbshots=0)
+    if algorithm == "mpstraj":
+        from qat.core import Observable, Schedule, Term
+        from qat.core.variables import Variable
+
+        problem_observable = problem.get_observable("terms")
+        n_qubits = problem_observable.nbqbits
+        mixing = Observable(
+            n_qubits, pauli_terms=[Term(1.0, "X", [index]) for index in range(n_qubits)]
+        )
+        tau = Variable("t", float) / aqo_time
+        schedule = Schedule(
+            drive=(1 - tau) * mixing + tau * problem_observable, tmax=aqo_time
+        )
+        return schedule.to_job(
+            job_type="SAMPLE", nbshots=shots, psi_0="+" * n_qubits
+        )
     if algorithm == "sa":
         return problem.sqa_job(tmax=_ANNEALING_TIME, nbshots=shots)
     if algorithm == "sqa":
@@ -88,11 +104,11 @@ def run(
     shots=_DEFAULT_SHOTS,
     aqo_time=_ANNEALING_TIME,
 ):
-    """Execute the same graph-size QScore search using AQO or SA jobs."""
-    if not isinstance(algorithm, str) or algorithm not in {"aqo", "sa", "sqa"}:
+    """Execute the QScore size search with AQO, SA, SQA or analog SAMPLE jobs."""
+    if not isinstance(algorithm, str) or algorithm not in {"aqo", "sa", "sqa", "mpstraj"}:
         raise ValueError(f"Unsupported annealing algorithm: {algorithm!r}.")
     check_parameters_value(initial_size, size_limit, beta, iterator, 1, seed)
-    if algorithm in {"sa", "sqa"} and (
+    if algorithm in {"sa", "sqa", "mpstraj"} and (
         isinstance(shots, bool) or not isinstance(shots, Integral) or shots < 1
     ):
         raise ValueError("shots must be a positive integer.")
@@ -117,7 +133,7 @@ def run(
             next_seed += 1
             graph = nx.generators.erdos_renyi_graph(size, 0.5, seed=current_seed)
             graph_seed = current_seed
-            if algorithm == "aqo" and graph.number_of_edges() == 0:
+            if algorithm in {"aqo", "mpstraj"} and graph.number_of_edges() == 0:
                 retry_seed = current_seed
                 for _ in range(10):
                     retry_seed += 1
@@ -137,8 +153,8 @@ def run(
             job = _make_job(problem, algorithm, shots, aqo_time=aqo_time)
             started = time.perf_counter()
             result = qpu.submit(job)
-            duration = time.perf_counter() - started
             score = _score_from_result(result, graph)
+            duration = time.perf_counter() - started
             scores.append(score)
             instances.append(
                 {"seed": graph_seed, "score": score, "duration_seconds": duration}

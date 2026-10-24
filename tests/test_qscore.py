@@ -187,7 +187,7 @@ class ExperimentTests(unittest.TestCase):
         qscore_factory.assert_not_called()
 
     def test_remote_variational_devices_use_qscore_core(self):
-        for device in ("MPS", "MPSTraj"):
+        for device in ("MPS",):
             with self.subTest(device=device):
                 qpu = MagicMock(name=f"{device} QPU")
                 qscore = MagicMock(name="QScore instance")
