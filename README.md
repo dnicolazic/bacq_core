@@ -68,6 +68,21 @@ pip install bacq_core
 
 Proceed the same way to install the relevant benchmark package when applicable (see their documentation).
 
+### Install the QScore integration dependency
+
+The QScore package is maintained in a separate repository. To install the
+version intended for BACQ's QScore integration, install BACQ core with its
+optional `qscore` extra from the repository root:
+```bash
+pip install -e ".[qscore]"
+```
+This extra installs `qat-qscore` from the `myqlm-compatibility-updates` branch
+of [dnicolazic/qscore](https://github.com/dnicolazic/qscore). It does not add
+QScore as a required dependency for other BACQ benchmarks.
+To run QScore on the myQLM `PyLinalg` emulator, see
+[`src/bacq_core/benchmarks/qscore/README.md`](src/bacq_core/benchmarks/qscore/README.md)
+and the example protocol at [`examples/protocol_qscore.json`](examples/protocol_qscore.json).
+
 ## Run a benchmark
 **From a protocol description** (i.e run with experiments on hardware)
 1) Add your protocol input file in `examples`
@@ -120,5 +135,3 @@ Distribution license **EUPL v1.2**.
 
 See the `LICENSE.md` file for the full license text.
 Reference: <https://interoperable-europe.ec.europa.eu/licence/european-union-public-licence-version-12-eupl>
-
-

@@ -42,6 +42,9 @@ mbqs-mps = [
   "mbqs>=1.0.0; python_version>='3.12'",
   "emu-mps",
 ]
+qscore = [
+  "qat-qscore @ git+https://github.com/dnicolazic/qscore.git@myqlm-compatibility-updates",
+]
 
 [project.urls]
 Homepage = "https://www.lne.fr/en/metriqs-france/projet-bacq"
