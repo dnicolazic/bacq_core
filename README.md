@@ -115,13 +115,13 @@ These benchmark results are also saved in a `result(s)_benchmarkname_devicename_
 If experiments are performed in the process, an associated file is saved as `expdata_(seq_)benchmarkname_devicename_date.json`, in adequate format for benchmark evaluation.
 
 ## Authors and acknowledgment
-This repository is maintained by Laboratoire National de métrologie et d'essais (LNE) and is the result of a collaborative work between Thales, Eviden, an Atos business, CEA, and CNRS.
+This repository is maintained by Laboratoire National de métrologie et d'essais (LNE) and is the result of a collaborative work between Thales, Bull, CEA, and CNRS.
 
 The main contributors are
 - Noe OLIVIER, cortAIx Labs, Thales Research & Technology, France
 - Michel NOWAK, cortAIx Labs, Thales Research & Technology, France
 - Christophe LABREUCHE, cortAIx Labs, Thales Research & Technology, France
-- Damien NICOLAZIC, Eviden, France
+- Damien NICOLAZIC, Bull, France
 - Grégoire MISGUICH, CEA, Institut de thysique théorique, France
 - Harold ERBIN, CEA Institut de physique théorique, France
 - Kyrylo SNIZHKO, CEA PHELIQS, France
