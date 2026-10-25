@@ -47,6 +47,36 @@ class RemoteContractTests(unittest.TestCase):
         self.assertEqual(job.schedule.tmax, tmax)
         self.assertEqual(str(job.schedule), str(expected.schedule))
 
+    def test_myqlm_emulator_uses_configured_default_qpu(self):
+        from bacq_core.hardware import myqlm_emulator
+
+        default_qpu = MagicMock(name="default myQLM QPU")
+        with patch("qat.qpus.get_default_qpu", return_value=default_qpu) as factory:
+            result = myqlm_emulator.build_backend()
+        factory.assert_called_once_with()
+        self.assertIs(result, default_qpu)
+
+    def test_qscore_runs_on_myqlm_default_qpu(self):
+        import qat.qscore.benchmark as benchmark
+
+        previous_instances = benchmark._NB_INSTANCES_PER_SIZE
+        benchmark._NB_INSTANCES_PER_SIZE = 1
+        self.addCleanup(
+            setattr, benchmark, "_NB_INSTANCES_PER_SIZE", previous_instances
+        )
+        result = experiment.run(
+            "MyQLMEmulator",
+            initial_size=3,
+            size_limit=3,
+            beta=0.2,
+            iterator="exhaustive",
+            depth=1,
+            seed=42,
+        )
+        self.assertEqual(result["device"], "MyQLMEmulator")
+        self.assertIn(3, result["result"]["evaluations"])
+        self.assertEqual(len(result["result"]["raw_data"][3]), 1)
+
     def test_mpstraj_imports_only_remote_mpstraj_and_forwards_parameters(self):
         qpus = ModuleType("qlmaas.qpus")
         qpus.MPSTraj = MagicMock()
@@ -66,18 +96,59 @@ class RemoteContractTests(unittest.TestCase):
         for name in ("mpstraj_steps", "mpstraj_bond_dimension", "mpstraj_tmax", "shots"):
             self.assertEqual(result["parameters"][name], params[name])
 
-    def test_mps_only_imports_remote_mps_and_keeps_local_optimizer(self):
+    def test_mps_uses_reference_remote_optimizer_and_bond_dimension(self):
         qpus = ModuleType("qlmaas.qpus")
         qpus.MPS = MagicMock()
+        plugins = ModuleType("qlmaas.plugins")
+        plugins.ScipyMinimizePlugin = MagicMock()
         package = ModuleType("qlmaas")
         package.__path__ = []
         with (
-            patch.dict("sys.modules", {"qlmaas": package, "qlmaas.qpus": qpus}),
-            patch("qat.vsolve.optimize.ScipyMinimizePlugin") as optimizer,
+            patch.dict(
+                "sys.modules",
+                {
+                    "qlmaas": package,
+                    "qlmaas.qpus": qpus,
+                    "qlmaas.plugins": plugins,
+                },
+            ),
         ):
-            experiment._build_qaptiva_variational_qpu("MPS")
-        qpus.MPS.assert_called_once_with()
-        optimizer.return_value.__or__.assert_called_once_with(qpus.MPS.return_value)
+            experiment._build_qaptiva_variational_qpu(
+                "MPS", {"mps_bond_dimension": 16}
+            )
+        qpus.MPS.assert_called_once_with(bond_dimension=16)
+        plugins.ScipyMinimizePlugin.assert_called_once_with(
+            method="COBYLA", tol=1e-4, options={"maxiter": 300}
+        )
+        plugins.ScipyMinimizePlugin.return_value.__or__.assert_called_once_with(
+            qpus.MPS.return_value
+        )
+
+    def test_reference_annealing_qpu_parameters_and_schedules(self):
+        qpus = ModuleType("qlmaas.qpus")
+        qpus.AnalogQPU = MagicMock()
+        qpus.SQAQPU = MagicMock()
+        package = ModuleType("qlmaas")
+        package.__path__ = []
+        with patch.dict("sys.modules", {"qlmaas": package, "qlmaas.qpus": qpus}):
+            experiment._build_qaptiva_annealing_qpu(
+                "AnalogQPU", {"analog_steps": 50}
+            )
+            experiment._build_qaptiva_annealing_qpu(
+                "SQAQPU",
+                {
+                    "sqa_steps": 50,
+                    "sqa_trotters": 8,
+                    "sqa_temp_min": 0.1,
+                    "sqa_temp_max": 5.0,
+                    "sqa_tmax": 1.0,
+                },
+            )
+        qpus.AnalogQPU.assert_called_once_with(n_steps=50)
+        qpus.SQAQPU.assert_called_once()
+        sqa_kwargs = qpus.SQAQPU.call_args.kwargs
+        self.assertEqual((sqa_kwargs["n_steps"], sqa_kwargs["n_trotters"]), (50, 8))
+        self.assertIsNotNone(sqa_kwargs["temp_t"])
 
     def test_invalid_mpstraj_constructor_parameters_fail_offline(self):
         for name in ("mpstraj_steps", "mpstraj_bond_dimension"):

@@ -14,7 +14,7 @@ from .helpers_protocol import check_parameters_value
 
 _NB_INSTANCES_PER_SIZE = 100
 _ANNEALING_TIME = 1.0
-_DEFAULT_SHOTS = 100
+_DEFAULT_SHOTS = 1024
 
 
 def _state_bits(state, n_qubits):
@@ -58,7 +58,9 @@ def _score_from_result(result, graph):
     return max(_cut_score(graph, sample.state) for sample in samples)
 
 
-def _make_job(problem, algorithm, shots, aqo_time=_ANNEALING_TIME):
+def _make_job(
+    problem, algorithm, shots, aqo_time=_ANNEALING_TIME, gamma_t=None
+):
     if algorithm == "aqo":
         return problem.aqo_job(tmax=aqo_time, nbshots=0)
     if algorithm == "mpstraj":
@@ -80,13 +82,13 @@ def _make_job(problem, algorithm, shots, aqo_time=_ANNEALING_TIME):
     if algorithm == "sa":
         return problem.sqa_job(tmax=_ANNEALING_TIME, nbshots=shots)
     if algorithm == "sqa":
-        from qat.core.variables import Variable
+        if gamma_t is None:
+            from qat.core.variables import Variable
 
-        time = Variable("t", float)
-        gamma_t = 1.0 - time
+            gamma_t = 1.0 - Variable("t", float)
         return problem.sqa_job(
             gamma_t=gamma_t,
-            tmax=_ANNEALING_TIME,
+            tmax=aqo_time,
             nbshots=shots,
         )
     raise ValueError(f"Unsupported annealing algorithm: {algorithm!r}.")
@@ -103,6 +105,7 @@ def run(
     seed,
     shots=_DEFAULT_SHOTS,
     aqo_time=_ANNEALING_TIME,
+    gamma_t=None,
 ):
     """Execute the QScore size search with AQO, SA, SQA or analog SAMPLE jobs."""
     if not isinstance(algorithm, str) or algorithm not in {"aqo", "sa", "sqa", "mpstraj"}:
@@ -150,9 +153,17 @@ def run(
 
             next_seed = max(next_seed, graph_seed + 1)
             problem = MaxCut(graph)
-            job = _make_job(problem, algorithm, shots, aqo_time=aqo_time)
+            job = _make_job(
+                problem,
+                algorithm,
+                shots,
+                aqo_time=aqo_time,
+                gamma_t=gamma_t,
+            )
             started = time.perf_counter()
             result = qpu.submit(job)
+            if callable(getattr(result, "join", None)):
+                result = result.join()
             score = _score_from_result(result, graph)
             duration = time.perf_counter() - started
             scores.append(score)

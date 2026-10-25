@@ -1,6 +1,7 @@
 """Run QScore using myQLM simulators."""
 
 import math
+from numbers import Integral, Real
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from . import annealing
 from .helpers_protocol import check_parameters_value
 
 
-_QAOA_DEVICES = {"CLinalg", "MPS"}
+_QAOA_DEVICES = {"CLinalg", "MPS", "MyQLMEmulator"}
 _SUPPORTED_DEVICES = _QAOA_DEVICES | {
     "QutipQPU",
     "AnalogQPU",
@@ -29,26 +30,37 @@ def _build_clinalg_qpu():
     ) | CLinalg()
 
 
-def _build_qaptiva_variational_qpu(device):
+def _build_qaptiva_variational_qpu(device, params=None):
+    params = params or {}
+    bond_dimension = params.get("mps_bond_dimension", 16)
+    if (
+        isinstance(bond_dimension, bool)
+        or not isinstance(bond_dimension, Integral)
+        or bond_dimension < 1
+    ):
+        raise ValueError("mps_bond_dimension must be a positive integer.")
     try:
+        from qlmaas.plugins import ScipyMinimizePlugin
         from qlmaas.qpus import MPS
     except ImportError as error:
         raise ImportError(
             f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
         ) from error
 
-    from qat.vsolve.optimize import ScipyMinimizePlugin
-
-    return ScipyMinimizePlugin(
+    optimizer = ScipyMinimizePlugin(
         method="COBYLA",
         tol=1e-4,
         options={"maxiter": 300},
-    ) | MPS()
+    )
+    qpu_kwargs = {}
+    if "mps_bond_dimension" in params or device == "MPS":
+        qpu_kwargs["bond_dimension"] = int(bond_dimension)
+    return optimizer | MPS(**qpu_kwargs)
 
 
 def _build_qaptiva_mpstraj_qpu(params):
-    steps = params.get("mpstraj_steps", 5000)
-    bond_dimension = params.get("mpstraj_bond_dimension", 8)
+    steps = params.get("mpstraj_steps", 50)
+    bond_dimension = params.get("mpstraj_bond_dimension", 32)
     for name, value in (("mpstraj_steps", steps), ("mpstraj_bond_dimension", bond_dimension)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} must be a positive integer.")
@@ -59,7 +71,7 @@ def _build_qaptiva_mpstraj_qpu(params):
     return MPSTraj(n_steps=steps, bond_dimension=bond_dimension, seed=params["seed"])
 
 
-def _build_qaptiva_annealing_qpu(device):
+def _build_qaptiva_annealing_qpu(device, params):
     try:
         from qlmaas.qpus import AnalogQPU, SQAQPU
     except ImportError as error:
@@ -67,7 +79,41 @@ def _build_qaptiva_annealing_qpu(device):
             f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
         ) from error
 
-    return {"AnalogQPU": AnalogQPU, "SQAQPU": SQAQPU}[device]()
+    if device == "AnalogQPU":
+        steps = params.get("analog_steps", 50)
+        if isinstance(steps, bool) or not isinstance(steps, Integral) or steps < 1:
+            raise ValueError("analog_steps must be a positive integer.")
+        return AnalogQPU(n_steps=int(steps))
+
+    from qat.core.variables import Variable
+
+    steps = params.get("sqa_steps", 50)
+    trotters = params.get("sqa_trotters", 8)
+    for name, value in (("sqa_steps", steps), ("sqa_trotters", trotters)):
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    tmax = params.get("sqa_tmax", annealing._ANNEALING_TIME)
+    temp_min = params.get("sqa_temp_min", 0.1)
+    temp_max = params.get("sqa_temp_max", 5.0)
+    for name, value in (("sqa_tmax", tmax), ("sqa_temp_min", temp_min),
+                        ("sqa_temp_max", temp_max)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a finite positive number.")
+    if temp_max <= temp_min:
+        raise ValueError("sqa_temp_max must be greater than sqa_temp_min.")
+    time = Variable("t", float)
+    tau = time / tmax
+    temp_t = temp_min * tau + temp_max * (1 - tau)
+    return SQAQPU(
+        temp_t=temp_t,
+        n_steps=int(steps),
+        n_trotters=int(trotters),
+    )
 
 
 def _build_qutip_qpu(params):
@@ -131,13 +177,35 @@ def _run_annealing(device, params):
     elif device == "MPSTraj":
         qpu = _build_qaptiva_mpstraj_qpu(params)
         algorithm = "mpstraj"
-        evolution_time = params.get("mpstraj_tmax", 1000.0)
+        evolution_time = params.get("mpstraj_tmax", 5.0)
     elif device in {"AnalogQPU", "SQAQPU"}:
-        qpu = _build_qaptiva_annealing_qpu(device)
+        qpu = _build_qaptiva_annealing_qpu(device, params)
         algorithm = "aqo" if device == "AnalogQPU" else "sqa"
+        evolution_time = (
+            params.get("analog_tmax", 5.0)
+            if device == "AnalogQPU"
+            else params.get("sqa_tmax", annealing._ANNEALING_TIME)
+        )
     else:
         qpu = _build_simulated_annealing_qpu(params, params["seed"])
         algorithm = "sa"
+    gamma_t = None
+    if device == "SQAQPU":
+        from qat.core.variables import Variable
+
+        gamma_min = params.get("sqa_gamma_min", 0.1)
+        gamma_max = params.get("sqa_gamma_max", 1.0)
+        for name, value in (("sqa_gamma_min", gamma_min), ("sqa_gamma_max", gamma_max)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a finite positive number.")
+        time = Variable("t", float)
+        tau = time / evolution_time
+        gamma_t = gamma_min * tau + gamma_max * (1 - tau)
     return annealing.run(
         qpu,
         algorithm,
@@ -148,6 +216,7 @@ def _run_annealing(device, params):
         seed=params["seed"],
         shots=params.get("shots", annealing._DEFAULT_SHOTS),
         aqo_time=evolution_time,
+        gamma_t=gamma_t,
     )
 
 
@@ -168,11 +237,22 @@ def run(device, **params):
     check_parameters_value(initial_size, size_limit, beta, iterator, depth, seed)
 
     if device in _QAOA_DEVICES:
-        qpu = (
-            _build_clinalg_qpu()
-            if device == "CLinalg"
-            else _build_qaptiva_variational_qpu(device)
-        )
+        if device == "MPS":
+            bond_dimension = params.get("mps_bond_dimension", 16)
+            if (
+                isinstance(bond_dimension, bool)
+                or not isinstance(bond_dimension, Integral)
+                or bond_dimension < 1
+            ):
+                raise ValueError("mps_bond_dimension must be a positive integer.")
+        if device == "CLinalg":
+            qpu = _build_clinalg_qpu()
+        elif device == "MyQLMEmulator":
+            from bacq_core.hardware.myqlm_emulator import build_backend
+
+            qpu = build_backend()
+        else:
+            qpu = _build_qaptiva_variational_qpu(device, params)
         with TemporaryDirectory(prefix="bacq-qscore-") as output_dir:
             output_path = Path(output_dir)
             report = _new_qscore(
@@ -211,9 +291,9 @@ def run(device, **params):
         run_parameters["qutip_tmax"] = params.get("qutip_tmax", 5.0)
     elif device == "MPSTraj":
         run_parameters.update(
-            mpstraj_steps=params.get("mpstraj_steps", 5000),
-            mpstraj_bond_dimension=params.get("mpstraj_bond_dimension", 8),
-            mpstraj_tmax=params.get("mpstraj_tmax", 1000.0),
+            mpstraj_steps=params.get("mpstraj_steps", 50),
+            mpstraj_bond_dimension=params.get("mpstraj_bond_dimension", 32),
+            mpstraj_tmax=params.get("mpstraj_tmax", 5.0),
             shots=params.get("shots", annealing._DEFAULT_SHOTS),
         )
     elif device == "SimulatedAnnealing":
@@ -224,7 +304,25 @@ def run(device, **params):
             temperature_max=params.get("temperature_max", 5.0),
         )
     elif device == "SQAQPU":
-        run_parameters["shots"] = params.get("shots", annealing._DEFAULT_SHOTS)
+        run_parameters.update(
+            shots=params.get("shots", annealing._DEFAULT_SHOTS),
+            sqa_steps=params.get("sqa_steps", 50),
+            sqa_trotters=params.get("sqa_trotters", 8),
+            sqa_temp_min=params.get("sqa_temp_min", 0.1),
+            sqa_temp_max=params.get("sqa_temp_max", 5.0),
+            sqa_gamma_min=params.get("sqa_gamma_min", 0.1),
+            sqa_gamma_max=params.get("sqa_gamma_max", 1.0),
+            sqa_tmax=params.get("sqa_tmax", annealing._ANNEALING_TIME),
+        )
+    elif device == "AnalogQPU":
+        run_parameters.update(
+            analog_steps=params.get("analog_steps", 50),
+            analog_tmax=params.get("analog_tmax", 5.0),
+        )
+    elif device == "MPS":
+        run_parameters["mps_bond_dimension"] = params.get(
+            "mps_bond_dimension", 16
+        )
 
     return {
         "filetype": "experiment",

@@ -206,7 +206,7 @@ class ExperimentTests(unittest.TestCase):
 
                 self.assertEqual(result["device"], device)
                 self.assertEqual(result["result"], VALID_REPORT)
-                build_qpu.assert_called_once_with(device)
+                build_qpu.assert_called_once_with(device, VALID_PARAMETERS)
                 self.assertIs(qscore_factory.call_args.args[0], qpu)
                 qscore.run.assert_called_once_with()
 
@@ -236,7 +236,7 @@ class ExperimentTests(unittest.TestCase):
                 self.assertEqual(run_annealing.call_args.args[:2], (qpu, algorithm))
                 self.assertEqual(
                     run_annealing.call_args.kwargs["aqo_time"],
-                    annealing._ANNEALING_TIME,
+                    5.0 if device == "AnalogQPU" else annealing._ANNEALING_TIME,
                 )
 
     def test_invalid_parameters_do_not_start_qscore(self):
@@ -434,6 +434,21 @@ class ExperimentTests(unittest.TestCase):
             str(kwargs["gamma_t"]),
             str(1.0 - Variable("t", float)),
         )
+
+    def test_sqa_job_accepts_reference_transverse_field_schedule(self):
+        from qat.core.variables import Variable
+
+        problem = MagicMock(name="MaxCut problem")
+        gamma_t = 0.1 * (Variable("t", float) / 2.0) + 1.0 * (
+            1 - Variable("t", float) / 2.0
+        )
+        annealing._make_job(
+            problem, "sqa", shots=1024, aqo_time=2.0, gamma_t=gamma_t
+        )
+        kwargs = problem.sqa_job.call_args.kwargs
+        self.assertEqual(kwargs["tmax"], 2.0)
+        self.assertEqual(kwargs["nbshots"], 1024)
+        self.assertEqual(str(kwargs["gamma_t"]), str(gamma_t))
 
     def test_qutip_qpu_is_constructed_with_requested_steps(self):
         with patch("qat.analog.qutip_qpu.QutipQPU") as qutip_class:
