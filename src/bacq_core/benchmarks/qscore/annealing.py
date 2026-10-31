@@ -24,13 +24,14 @@ def _state_bits(state, n_qubits):
         integer_state = int(state)
         if integer_state < 0 or integer_state >= 1 << n_qubits:
             raise ValueError("QPU sample state is outside the graph's state space.")
-        return [(integer_state >> index) & 1 for index in range(n_qubits)]
+        # QLM convention: qubit 0 is the most significant bit.
+        return [(integer_state >> (n_qubits - 1 - index)) & 1 for index in range(n_qubits)]
 
     state_text = str(state).replace("|", "").replace(">", "").strip()
     if state_text.startswith("0b"):
         state_text = state_text[2:]
     if len(state_text) == n_qubits and set(state_text).issubset({"0", "1"}):
-        return [int(bit) for bit in state_text[::-1]]
+        return [int(bit) for bit in state_text]
 
     raise TypeError(f"Unsupported QPU sample state: {state!r}.")
 
@@ -38,6 +39,26 @@ def _state_bits(state, n_qubits):
 def _cut_score(graph, state):
     bits = _state_bits(state, graph.number_of_nodes())
     return float(sum(bits[left] != bits[right] for left, right in graph.edges()))
+
+
+def _mean_cut_score(graph, samples):
+    """Compute the expected cut from a complete sampled distribution."""
+    weighted_scores = []
+    probabilities = []
+    for sample in samples:
+        probability = getattr(sample, "probability", None)
+        if isinstance(probability, bool) or not isinstance(probability, Real):
+            raise TypeError("QPU sample probability must be a real number.")
+        if not math.isfinite(probability) or not 0 <= probability <= 1:
+            raise ValueError("QPU sample probability must be finite and between 0 and 1.")
+        probabilities.append(float(probability))
+        weighted_scores.append(probability * _cut_score(graph, sample.state))
+    if not probabilities:
+        raise RuntimeError("Cannot compute a mean cut without samples.")
+    total = math.fsum(probabilities)
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(f"QPU sample probabilities must sum to 1; received {total}.")
+    return float(math.fsum(weighted_scores) / total)
 
 
 def _score_from_result(result, graph):
@@ -55,7 +76,7 @@ def _score_from_result(result, graph):
     samples = list(raw_data)
     if not samples:
         raise RuntimeError("Annealing QPU returned no samples.")
-    return max(_cut_score(graph, sample.state) for sample in samples)
+    return _mean_cut_score(graph, samples)
 
 
 def _make_job(
@@ -69,12 +90,15 @@ def _make_job(
 
         problem_observable = problem.get_observable("terms")
         n_qubits = problem_observable.nbqbits
+        # -sum(X) has |+...+> as ground state, as in MaxCut.aqo_job; with +sum(X)
+        # the evolution would follow the highest-energy state to the minimum cut.
         mixing = Observable(
-            n_qubits, pauli_terms=[Term(1.0, "X", [index]) for index in range(n_qubits)]
+            n_qubits, pauli_terms=[Term(-1.0, "X", [index]) for index in range(n_qubits)]
         )
         tau = Variable("t", float) / aqo_time
+        # MPSTraj needs numeric observable coefficients; keep time in the drive.
         schedule = Schedule(
-            drive=(1 - tau) * mixing + tau * problem_observable, tmax=aqo_time
+            drive=[(1 - tau, mixing), (tau, problem_observable)], tmax=aqo_time
         )
         return schedule.to_job(
             job_type="SAMPLE", nbshots=shots, psi_0="+" * n_qubits

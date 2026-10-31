@@ -1,6 +1,7 @@
 """Run QScore using myQLM simulators."""
 
 import math
+import os
 from numbers import Integral, Real
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -17,6 +18,11 @@ _SUPPORTED_DEVICES = _QAOA_DEVICES | {
     "SimulatedAnnealing",
     "MPSTraj",
 }
+
+
+def _qaptiva_local():
+    """True when QAPTIVA_LOCAL=true: import from qat.* on a Qaptiva machine."""
+    return os.environ.get("QAPTIVA_LOCAL", "").strip().lower() == "true"
 
 
 def _build_clinalg_qpu():
@@ -40,8 +46,12 @@ def _build_qaptiva_variational_qpu(device, params=None):
     ):
         raise ValueError("mps_bond_dimension must be a positive integer.")
     try:
-        from qlmaas.plugins import ScipyMinimizePlugin
-        from qlmaas.qpus import MPS
+        if _qaptiva_local():
+            from qat.plugins import ScipyMinimizePlugin
+            from qat.qpus import MPS
+        else:
+            from qlmaas.plugins import ScipyMinimizePlugin
+            from qlmaas.qpus import MPS
     except ImportError as error:
         raise ImportError(
             f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
@@ -65,15 +75,23 @@ def _build_qaptiva_mpstraj_qpu(params):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} must be a positive integer.")
     try:
-        from qlmaas.qpus import MPSTraj
+        if _qaptiva_local():
+            from qat.qpus import MPSTraj
+        else:
+            from qlmaas.qpus import MPSTraj
     except ImportError as error:
-        raise ImportError("MPSTraj requires a configured QLMaaS MPSTraj QPU.") from error
+        raise ImportError(
+            "MPSTraj requires a configured QLMaaS MPSTraj QPU."
+        ) from error
     return MPSTraj(n_steps=steps, bond_dimension=bond_dimension, seed=params["seed"])
 
 
 def _build_qaptiva_annealing_qpu(device, params):
     try:
-        from qlmaas.qpus import AnalogQPU, SQAQPU
+        if _qaptiva_local():
+            from qat.qpus import AnalogQPU, SQAQPU
+        else:
+            from qlmaas.qpus import AnalogQPU, SQAQPU
     except ImportError as error:
         raise ImportError(
             f"{device} requires QLMaaS configuration and myQLM's QLMaaS QPUs."
@@ -286,6 +304,8 @@ def run(device, **params):
         "depth": depth,
         "seed": seed,
     }
+    if device in {"MPSTraj", "SimulatedAnnealing", "SQAQPU"}:
+        run_parameters["score_method"] = "expected_cut"
     if device == "QutipQPU":
         run_parameters["qutip_steps"] = params.get("qutip_steps", 100)
         run_parameters["qutip_tmax"] = params.get("qutip_tmax", 5.0)

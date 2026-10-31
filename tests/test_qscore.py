@@ -381,9 +381,92 @@ class ExperimentTests(unittest.TestCase):
         graph = nx.Graph([(0, 1), (1, 2)])
         result = SimpleNamespace(
             value=None,
-            raw_data=[SimpleNamespace(state=0b101)],
+            raw_data=[SimpleNamespace(state=0b101, probability=1.0)],
         )
         self.assertEqual(annealing._score_from_result(result, graph), 2.0)
+
+    def test_annealing_scores_probability_weighted_mean_not_best_sample(self):
+        graph = nx.path_graph(3)
+        result = SimpleNamespace(
+            value=None,
+            raw_data=[
+                SimpleNamespace(state=0b000, probability=0.75),
+                SimpleNamespace(state=0b101, probability=0.25),
+            ],
+        )
+        self.assertEqual(annealing._score_from_result(result, graph), 0.5)
+
+    def test_annealing_observable_value_takes_precedence_over_samples(self):
+        result = SimpleNamespace(
+            value=-0.75, raw_data=[SimpleNamespace(state=0b101, probability=1.0)]
+        )
+        self.assertEqual(annealing._score_from_result(result, nx.path_graph(3)), 0.75)
+
+    def test_sampled_devices_save_expected_cut_scores_and_metadata(self):
+        samples = [
+            SimpleNamespace(state=0b101, probability=0.25),
+            SimpleNamespace(state=0b000, probability=0.75),
+        ]
+        qpu = SimpleNamespace(
+            submit=lambda _job: SimpleNamespace(value=None, raw_data=samples)
+        )
+        for device, builder in (
+            ("MPSTraj", "_build_qaptiva_mpstraj_qpu"),
+            ("SimulatedAnnealing", "_build_simulated_annealing_qpu"),
+            ("SQAQPU", "_build_qaptiva_annealing_qpu"),
+        ):
+            with (
+                self.subTest(device=device),
+                patch.object(experiment, builder, return_value=qpu),
+                patch.object(annealing, "_NB_INSTANCES_PER_SIZE", 1),
+                patch("networkx.generators.erdos_renyi_graph",
+                      return_value=nx.path_graph(3)),
+            ):
+                payload = experiment.run(
+                    device, **{**VALID_PARAMETERS, "initial_size": 3, "size_limit": 3}
+                )
+            self.assertEqual(payload["parameters"]["score_method"], "expected_cut")
+            self.assertEqual(payload["result"]["raw_data"][3][0]["score"], 0.5)
+            self.assertAlmostEqual(
+                payload["result"]["evaluations"][3]["ratio"],
+                (0.5 - 0.75) / (0.178 * 3**1.5),
+            )
+
+    def test_mean_cut_rejects_invalid_probabilities(self):
+        for probability in (None, True, "1", -0.1, 1.1, float("nan"), float("inf")):
+            with self.subTest(probability=probability):
+                with self.assertRaises((TypeError, ValueError)):
+                    annealing._mean_cut_score(
+                        nx.path_graph(3),
+                        [SimpleNamespace(state=0b101, probability=probability)],
+                    )
+        for probabilities in ([], [0.0], [0.5], [0.75, 0.75]):
+            with self.subTest(probabilities=probabilities):
+                with self.assertRaises((RuntimeError, ValueError)):
+                    annealing._mean_cut_score(
+                        nx.path_graph(3),
+                        [SimpleNamespace(state=0, probability=p) for p in probabilities],
+                    )
+
+    def test_mean_cut_normalizes_roundoff_only(self):
+        samples = [SimpleNamespace(state=0b101, probability=0.9999999)]
+        self.assertEqual(annealing._mean_cut_score(nx.path_graph(3), samples), 2.0)
+
+    def test_sample_states_use_qlm_qubit_order(self):
+        from qat.lang.AQASM import Program, X
+        from qat.qpus import PyLinalg
+
+        program = Program()
+        qubits = program.qalloc(3)
+        program.apply(X, qubits[0])
+        sample = next(iter(PyLinalg().submit(program.to_circ().to_job())))
+        graph = nx.Graph([(0, 1)])
+        graph.add_node(2)
+        for state in (sample.state, sample.state.int, str(sample.state), 0b100):
+            with self.subTest(state=state):
+                self.assertEqual(annealing._state_bits(state, 3), [1, 0, 0])
+                self.assertEqual(annealing._cut_score(graph, state), 1.0)
+        self.assertEqual(annealing._cut_score(nx.Graph([(0, 1), (1, 2)]), 0b001), 1.0)
 
     def test_annealing_rejects_out_of_range_sample_states(self):
         for state in (-1, 0b100):

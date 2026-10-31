@@ -26,6 +26,9 @@ class RemoteContractTests(unittest.TestCase):
         self.addCleanup(guard.stop)
 
     def test_mpstraj_job_matches_reference_schedule_sample_construction(self):
+        from numbers import Number
+
+        import numpy as np
         from qat.core import Observable, Schedule, Term
         from qat.core.variables import Variable
         from qat.opt import MaxCut
@@ -34,9 +37,9 @@ class RemoteContractTests(unittest.TestCase):
         tmax = 12.0
         job = annealing._make_job(problem, "mpstraj", shots=7, aqo_time=tmax)
         tau = Variable("t", float) / tmax
-        mixing = Observable(3, pauli_terms=[Term(1.0, "X", [i]) for i in range(3)])
+        mixing = Observable(3, pauli_terms=[Term(-1.0, "X", [i]) for i in range(3)])
         expected = Schedule(
-            drive=(1 - tau) * mixing + tau * problem.get_observable("terms"),
+            drive=[(1 - tau, mixing), (tau, problem.get_observable("terms"))],
             tmax=tmax,
         ).to_job(job_type="SAMPLE", nbshots=7, psi_0="+++")
         self.assertIsNone(job.circuit)
@@ -46,6 +49,32 @@ class RemoteContractTests(unittest.TestCase):
         self.assertEqual(job.nbshots, 7)
         self.assertEqual(job.schedule.tmax, tmax)
         self.assertEqual(str(job.schedule), str(expected.schedule))
+        for _, observable in job.schedule.drive:
+            self.assertIsInstance(observable.constant_coeff, Number)
+            for term in observable.terms:
+                self.assertIsInstance(term.coeff, Number)
+                abs(term.coeff)
+        for time in (0.0, tmax / 2, tmax):
+            actual_matrix = sum(
+                coefficient(t=time) * observable.to_matrix()
+                for coefficient, observable in job.schedule.drive
+            )
+            expected_matrix = (
+                (1 - time / tmax) * mixing.to_matrix()
+                + (time / tmax) * problem.get_observable("terms").to_matrix()
+            )
+            np.testing.assert_allclose(
+                actual_matrix.toarray(), expected_matrix.toarray()
+            )
+
+    def test_mpstraj_mixer_matches_maxcut_aqo_job(self):
+        from qat.opt import MaxCut
+
+        problem = MaxCut(nx.erdos_renyi_graph(5, 0.5, seed=42))
+        job = annealing._make_job(problem, "mpstraj", shots=7, aqo_time=5.0)
+        reference = problem.aqo_job(tmax=5.0, nbshots=0)
+        self.assertEqual(job.psi_0, reference.psi_0)
+        self.assertEqual(str(job.schedule.drive[0][1]), str(reference.schedule.drive[0][1]))
 
     def test_myqlm_emulator_uses_configured_default_qpu(self):
         from bacq_core.hardware import myqlm_emulator
@@ -150,6 +179,30 @@ class RemoteContractTests(unittest.TestCase):
         self.assertEqual((sqa_kwargs["n_steps"], sqa_kwargs["n_trotters"]), (50, 8))
         self.assertIsNotNone(sqa_kwargs["temp_t"])
 
+    def test_qaptiva_local_imports_qat_qpus_and_plugins_not_qlmaas(self):
+        qpus = ModuleType("qat.qpus")
+        for name in ("MPS", "MPSTraj", "AnalogQPU", "SQAQPU"):
+            setattr(qpus, name, MagicMock(name=name))
+        plugins = ModuleType("qat.plugins")
+        plugins.ScipyMinimizePlugin = MagicMock()
+        sqa_params = {"sqa_steps": 50, "sqa_trotters": 8, "sqa_temp_min": 0.1,
+                      "sqa_temp_max": 5.0, "sqa_tmax": 1.0}
+        with (
+            patch.dict("os.environ", {"QAPTIVA_LOCAL": "true"}),
+            patch.dict("sys.modules", {
+                "qat.qpus": qpus, "qat.plugins": plugins,
+                "qlmaas": None, "qlmaas.qpus": None, "qlmaas.plugins": None,
+            }),
+        ):
+            experiment._build_qaptiva_variational_qpu("MPS", {"mps_bond_dimension": 16})
+            experiment._build_qaptiva_mpstraj_qpu(PARAMETERS)
+            experiment._build_qaptiva_annealing_qpu("AnalogQPU", {"analog_steps": 50})
+            experiment._build_qaptiva_annealing_qpu("SQAQPU", sqa_params)
+        qpus.MPS.assert_called_once_with(bond_dimension=16)
+        qpus.MPSTraj.assert_called_once_with(n_steps=50, bond_dimension=32, seed=42)
+        qpus.AnalogQPU.assert_called_once_with(n_steps=50)
+        qpus.SQAQPU.assert_called_once()
+
     def test_invalid_mpstraj_constructor_parameters_fail_offline(self):
         for name in ("mpstraj_steps", "mpstraj_bond_dimension"):
             for value in (True, 0, -1, 2.5):
@@ -168,7 +221,9 @@ class RemoteContractTests(unittest.TestCase):
         from qat.qlmaas.result import AsyncResult
 
         clock = [10.0]
-        resolved = SimpleNamespace(value=None, raw_data=[SimpleNamespace(state=0b010)])
+        resolved = SimpleNamespace(
+            value=None, raw_data=[SimpleNamespace(state=0b010, probability=1.0)]
+        )
         pending = AsyncResult("offline", MagicMock(spec=QLMaaSConnection))
 
         def complete(_self):
@@ -230,6 +285,11 @@ class RemoteContractTests(unittest.TestCase):
         score = annealing._score_from_result(result, graph)
         self.assertGreaterEqual(score, 0.0)
         self.assertLessEqual(score, graph.number_of_edges())
+        # A correct adiabatic schedule beats the random-cut mean of edges / 2.
+        self.assertGreater(score, graph.number_of_edges() / 2)
+        self.assertLess(
+            score, max(annealing._cut_score(graph, sample.state) for sample in result)
+        )
 
     def test_remote_resolution_failure_propagates_instead_of_saving_a_score(self):
         from qat.qlmaas import QLMaaSConnection
