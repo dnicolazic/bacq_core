@@ -1,107 +1,137 @@
-# BACQ-OP-QSCORE with myQLM simulators
+# BACQ-OP-QSCORE: Q-Score Benchmark
 
-This BACQ benchmark runs the QScore implementation from the separate
-`myQLM/qscore` repository on `CLinalg`. It also supports two local
-annealing modes, implemented in BACQ with the same graph-size search and QScore
-metric: myQLM's `QutipQPU` uses analog quantum optimization (AQO) jobs, and
-`SimulatedAnnealing` uses MaxCut annealing jobs. These modes do not execute
-QScore's QAOA circuits.
+## 1. Overview & Concept
 
-Remote `MPS` uses QAOA with a local COBYLA plugin. Remote `MPSTraj` instead
-uses the reference BACQ noiseless analog workflow: a linear X-to-MaxCut
-Hamiltonian schedule, a `SAMPLE` job with `psi_0="+"*N`, and positive shots,
-without a variational optimizer. The caller must configure QLMaaS before
-running these devices; the workbench creates its SSL connection and calls
-`override_default()` before remote QPU imports.
+**Q-Score** is an application-oriented metric designed to evaluate the practical performance of quantum processors on a representative combinatorial optimization problem: **Max-Cut**.
 
-CLinalg, QutipQPU and SimulatedAnnealing are local emulators; they do not use
-BACQ's Qiskit IBM devices. The QutipQPU path requires the myQLM analog/Qutip simulator
-dependencies. SimulatedAnnealing is imported from
-`qat.simulated_annealing`.
+Instead of measuring low-level physical indicators (like gate fidelities or coherence times), Q-Score assesses the end-to-end performance of a complete workflow (problem formulation, quantum algorithm, classical optimizer, and hardware/emulator constraints).
 
-When using a local `qscore` checkout, do not put the checkout root first on
-`PYTHONPATH`: its `qat/__init__.py` shadows myQLM's compiled `qat` package, and
-QutipQPU then fails with `ImportError: cannot import name 'get_default_qpu'
-from 'qat.qpus'`. Install `qat-qscore` (it only ships `qat.qscore`) or append
-`qscore/qat` to the already-imported `qat.__path__`.
+> **In short:** Q-Score is the largest problem size $N$ (number of vertices in a graph) for which a solver performs significantly better than a random assignment according to a normalized quality threshold.
 
-## Install
+---
 
-From the `bacq_core` repository root, install the optional dependency:
+## 2. Mathematical Definition
 
-```bash
-python -m pip install -e ".[qscore]"
+### Max-Cut on Random Graphs
+Q-Score benchmarks performance on Erdős-Rényi random graphs $G(N, 1/2)$ with $N$ vertices, where each edge exists with probability $p = 1/2$.
+
+For each graph size $N$, the benchmark evaluates:
+1. **$C(N)$**: The average cut score achieved by the tested quantum algorithm / backend across multiple graph instances.
+2. **$C_{rand}(N)$**: The baseline expected score obtained by a purely random guess:
+   $$C_{rand}(N) \approx \frac{N^2}{8}$$
+3. **$C_{max}(N)$**: The expected optimal cut score achievable for random graphs $G(N, 1/2)$:
+   $$C_{max}(N) \approx \frac{N^2}{8} + 0.178\,N^{3/2}$$
+
+### Normalized Quality Ratio $\beta(N)$
+The normalized quality ratio measures the fraction of usable improvement over random guessing achieved by the setup:
+
+$$\beta(N) = \frac{C(N) - C_{rand}(N)}{C_{max}(N) - C_{rand}(N)} \approx \frac{C(N) - \frac{N^2}{8}}{0.178\,N^{3/2}}$$
+
+- $\beta(N) = 0$: Performance is no better than random guessing.
+- $\beta(N) = 1$: Performance achieves the theoretical optimum.
+- $0 < \beta(N) < 1$: Meaningful optimization is captured.
+
+### The Q-Score Metric
+Given a target quality threshold $\beta^*$ (by default $\beta^* = 0.2$, i.e. 20% of the available improvement above random):
+
+$$\text{Q-score}(\beta^*) = \max \{ N \mid \beta(N) > \beta^* \}$$
+
+---
+
+## 3. Evaluation Workflow
+
+```mermaid
+flowchart TD
+    A["Start: Graph Size N = initial_size"] --> B["Generate M random graph instances G(N, 1/2)"]
+    B --> C["Solve instances on backend (QAOA or Annealing)"]
+    C --> D["Compute average cut score C(N)"]
+    D --> E["Calculate normalized ratio β(N)"]
+    E --> F{"Is β(N) > β* ? (Default β* = 0.2)"}
+    F -- "Yes (Success)" --> G["Size N passes"]
+    G --> H{"Next size N? (Dichotomic / Exhaustive)"}
+    H -- "Within limits" --> I["Update N"]
+    I --> B
+    H -- "Search complete" --> J["Q-Score = largest passing size N"]
+    F -- "No (Failure)" --> K{"Iterator strategy"}
+    K -- "Exhaustive" --> J
+    K -- "Dichotomic" --> H
 ```
 
-The `qscore` extra installs `qat-qscore` from
-[myQLM/qscore](https://github.com/myQLM/qscore). This is separate
-from BACQ's required dependencies.
+---
 
-## Run
+## 4. Architecture & Supported Backends
 
-Use a BACQ protocol input with `"benchmark": "qscore"`. Set `"device"` to
-`"CLinalg"`, `"QutipQPU"`, or `"SimulatedAnnealing"`. The included example
-protocols use small graph sizes:
+In BACQ, Q-Score supports both gate-based variational algorithms and analog/annealing workflows:
+
+```mermaid
+flowchart LR
+    subgraph Input["Protocol Input"]
+        P["protocol_qscore.json"]
+    end
+
+    subgraph BACQ["BACQ Core Engine"]
+        M["bacq_core/main.py"] --> E["benchmarks/qscore/experiment.py"]
+        E --> S["Graph Size Sweep (Search Driver)"]
+    end
+
+    subgraph Backends["Execution Backends"]
+        S --> QAOA["Gate-based QAOA (CLinalg, MPS)"]
+        S --> Analog["Analog / Annealing (QutipQPU, SimulatedAnnealing)"]
+    end
+
+    subgraph Results["Benchmark Output"]
+        QAOA --> Out["JSON Result File"]
+        Analog --> Out
+        Out --> Metric["Metric: Q-Score value & evaluations"]
+    end
+
+    P --> M
+```
+
+- **QAOA (Gate-based):** Solves Max-Cut instances with parameterized circuits (depth $p$) optimized by a classical optimizer (e.g. COBYLA via `CLinalg` or `MPS`).
+- **Analog / Annealing:** Solves Max-Cut with continuous time evolution:
+  - `QutipQPU`: Analog Quantum Optimization (AQO) simulated via myQLM.
+  - `SimulatedAnnealing`: Classical simulated annealing on MaxCut problems.
+
+---
+
+## 5. Installation
+
+From the `bacq_core` repository root, install the optional `qscore` dependency:
 
 ```bash
+pip install -e ".[qscore]"
+```
+
+This installs `qat-qscore` from [myQLM/qscore](https://github.com/myQLM/qscore).
+
+---
+
+## 6. How to Run
+
+Run Q-Score using a BACQ protocol file:
+
+```bash
+# Run on CLinalg (QAOA)
 python src/bacq_core/main.py examples/protocol_qscore.json
+
+# Run on QutipQPU (Analog AQO)
 python src/bacq_core/main.py examples/protocol_qscore_qutip.json
+
+# Run on SimulatedAnnealing
 python src/bacq_core/main.py examples/protocol_qscore_simulated_annealing.json
 ```
 
-Each mode evaluates 100 random graph instances per tested size by default, so
-even emulator runs can take time. Increase `size_limit` for a larger sweep.
-`depth` is used for QAOA (CLinalg/MPS) and ignored by the annealing devices.
-The workbench runner also allows reducing instances and changing emulator
-steps/shots for fast experiments.
+### Protocol Parameters
 
-Parameters:
-
-- `initial_size`: smallest MaxCut graph size to test.
-- `size_limit`: largest MaxCut graph size to test.
-- `beta`: QScore threshold ratio.
-- `iterator`: `dichotomic` (binary search) or `exhaustive` (consecutive sizes
-  until the first failing size or the inclusive limit).
-- `depth`: QAOA depth.
-- `seed`: non-negative integer graph-generation seed, or `null` for a random
-  seed.
-- `qutip_steps`: positive integer evolution discretization for QutipQPU
-  (default 100).
-- `qutip_tmax`: finite positive AQO evolution time for QutipQPU (default 5.0,
-  matching the reference BACQ QutipQPU notebook). Saved with the result
-  parameters. Previously it was hard-coded to 1.0, which produced a ratio
-  below the threshold at size 5 and stopped the search immediately.
-  Other annealers retain their existing evolution time.
-- `mpstraj_steps`: positive integer analog discretization (default 5000).
-- `mpstraj_bond_dimension`: positive integer tensor bond dimension (default 8).
-- `mpstraj_tmax`: finite positive analog evolution time (default 1000.0).
-- `shots`: positive sample count for MPSTraj, SQAQPU and local SA.
-
-MPSTraj parameters follow the reference `qscore_bacq` adapter and are saved
-in the result JSON. This intentionally replaces the former MPSTraj QAOA
-route; `depth` no longer affects MPSTraj. AnalogQPU/SQAQPU settings were not
-changed: they retain AQO/SQA jobs and their current hyperparameters.
-
-QScore performs the graph-size sweep itself; use a single BACQ `protocol` input,
-not `protocol_seq`. BACQ records the QScore boundary or bound as its metric.
-`success` is true when QScore identifies an exact boundary between a passing
-and a failing size; it is false when the result is only an upper or lower bound.
-A size passes only when its ratio is strictly greater than `beta`; equality is
-a failing size. Thus the exact boundary is the passing size immediately before
-the first failing size. `dichotomic` assumes this pass/fail behavior is
-monotonic over graph sizes. When `initial_size` equals `size_limit`, the single
-size is evaluated once and can only produce an upper or lower bound, not an
-exact boundary. The per-instance seeds advance consecutively across all
-evaluated sizes and are included in the raw data.
-
-All QAOA and annealing paths save `duration_seconds` per instance in `raw_data`
-and `instance_duration_sum` in each size evaluation. Timings measure QPU
-submission/result resolution, including the QAOA optimizer where applicable,
-but exclude graph/job construction and result-file writing. The workbench uses
-these measured values for mean-instance and total-per-size runtime curves.
-The timer stops after reading the result/score, because the installed
-QLMaaS client's `AsyncResult` resolves lazily on `.value`/`.raw_data` access.
-This includes remote completion time rather than only submission latency.
-The offline remote-contract suite blocks sockets, checks real myQLM job
-construction and tests real `AsyncResult` objects with mocked completion;
-it does not certify authentication or server-side emulator availability.
+| Parameter | Type | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `device` | string | Target simulator/QPU (`CLinalg`, `QutipQPU`, `SimulatedAnnealing`, `MPS`, etc.) | Required |
+| `initial_size` | integer | Smallest graph size to test | `5` |
+| `size_limit` | integer | Largest graph size to test | `20` |
+| `beta` | float | Target quality threshold $\beta^*$ | `0.2` |
+| `iterator` | string | Search strategy: `"dichotomic"` (binary search) or `"exhaustive"` | `"dichotomic"` |
+| `depth` | integer | QAOA ansatz depth (QAOA devices only) | `1` |
+| `seed` | integer | Random seed for graph instance generation (`null` for random) | `42` |
+| `qutip_steps` | integer | Discretization steps for `QutipQPU` | `100` |
+| `qutip_tmax` | float | AQO evolution time for `QutipQPU` | `5.0` |
