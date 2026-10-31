@@ -43,7 +43,7 @@ mbqs-mps = [
   "emu-mps",
 ]
 qscore = [
-  "qat-qscore @ git+https://github.com/dnicolazic/qscore.git@myqlm-compatibility-updates",
+  "qat-qscore @ git+https://github.com/myQLM/qscore.git",
 ]
 
 [project.urls]

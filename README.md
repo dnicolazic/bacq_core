@@ -76,8 +76,8 @@ optional `qscore` extra from the repository root:
 ```bash
 pip install -e ".[qscore]"
 ```
-This extra installs `qat-qscore` from the `myqlm-compatibility-updates` branch
-of [dnicolazic/qscore](https://github.com/dnicolazic/qscore). It does not add
+This extra installs `qat-qscore` from
+[myQLM/qscore](https://github.com/myQLM/qscore). It does not add
 QScore as a required dependency for other BACQ benchmarks.
 To run QScore on the myQLM `CLinalg`, `QutipQPU`, or
 `SimulatedAnnealing` emulators, see

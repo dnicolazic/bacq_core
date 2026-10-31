@@ -1,7 +1,7 @@
 # BACQ-OP-QSCORE with myQLM simulators
 
 This BACQ benchmark runs the QScore implementation from the separate
-`dnicolazic/qscore` repository on `CLinalg`. It also supports two local
+`myQLM/qscore` repository on `CLinalg`. It also supports two local
 annealing modes, implemented in BACQ with the same graph-size search and QScore
 metric: myQLM's `QutipQPU` uses analog quantum optimization (AQO) jobs, and
 `SimulatedAnnealing` uses MaxCut annealing jobs. These modes do not execute
@@ -33,9 +33,8 @@ From the `bacq_core` repository root, install the optional dependency:
 python -m pip install -e ".[qscore]"
 ```
 
-The `qscore` extra installs `qat-qscore` from the
-`myqlm-compatibility-updates` branch of
-[dnicolazic/qscore](https://github.com/dnicolazic/qscore). This is separate
+The `qscore` extra installs `qat-qscore` from
+[myQLM/qscore](https://github.com/myQLM/qscore). This is separate
 from BACQ's required dependencies.
 
 ## Run
